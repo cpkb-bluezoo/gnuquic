@@ -1,0 +1,12 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: gnuquic
+Description: QUIC, TLS and DTLS engine
+Version: @VERSION@
+Requires.private: libgcrypt @GNUTLS_PC_REQUIRES@
+Libs: -L${libdir} -lgnuquic
+Libs.private: @LTLIBINTL@
+Cflags: -I${includedir}
