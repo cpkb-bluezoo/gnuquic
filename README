@@ -1,0 +1,73 @@
+GNU QUIC
+========
+
+GNU QUIC is a QUIC (RFC 9000), TLS 1.2/1.3 and DTLS 1.2/1.3 engine
+written in C for the GNU system.  It is the substrate on which HTTP/3
+and DNS over QUIC (DoQ) clients and servers are meant to be built.
+
+It is a sibling of the Gumdrop (Java) and Hopf (Rust) frameworks and
+follows the same design: a thin cryptographic layer, incremental push
+parsers that deliver semantic events, and reactive state machines that
+never block and never own a socket.
+
+Status
+------
+
+Pre-alpha.  What exists today:
+
+  crypto   libgcrypt-backed hashes, HMAC, HKDF, AES-GCM and
+           ChaCha20-Poly1305, header protection masks
+  frame    QUIC frame push parser and writer (all RFC 9000 frames plus
+           RFC 9221 DATAGRAM)
+  varint   RFC 9000 variable-length integers
+  packet   packet numbers, long/short header codecs, Version
+           Negotiation, Retry, stateless reset (QUIC v1 and v2)
+  protect  Initial and traffic key derivation, key update, in-place
+           packet protection, Retry integrity tag (checked against the
+           RFC 9001 and RFC 9369 appendix A vectors)
+  tparams  transport parameter codec with RFC 9000 validation
+  kx       key exchange: X25519, secp256r1, secp384r1 and the RFC 10024
+           ML-KEM hybrids, over libgcrypt
+  tlsmsg   TLS 1.3 handshake message codecs and writer (RFC 8446 s4)
+  keysched TLS 1.3 key schedule and transcript hash, SHA-256/SHA-384
+           (reproduces the RFC 8448 trace)
+  tls      TLS 1.3 client and server handshake engines (QUIC and TCP modes)
+  record   TLS 1.3 record layer (RFC 8448 records reproduced exactly)
+  tlsconn  TLS 1.3 over a byte stream: engine plus record layer;
+           client and server, interoperating with OpenSSL and GnuTLS
+  tickets  stateless session ticket key ring; PSK resumption in the
+           handshake engines (RFC 8448 section 4 reproduced)
+  sign     private key loading and CertificateVerify signatures
+           (GnuTLS backend; ML-DSA needs a backend that has it)
+  trust    trust anchors and certificate chain validation (GnuTLS
+           backend behind a replaceable interface)
+  policy   the closed set of versions, suites, groups and signature
+           schemes the library will ever negotiate
+
+Not yet written: 0-RTT early data, loss recovery and
+congestion control, connection and stream state, TLS 1.2, DTLS.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
+
+Building
+--------
+
+Requires libgcrypt >= 1.11 and, by default, GnuTLS >= 3.8.
+
+  ./autogen.sh        # only when building from a repository checkout
+  ./configure
+  make
+  make check
+
+Use --without-gnutls to build without certificate validation.  The build
+is expected to be free of compiler warnings.
+
+Licence
+-------
+
+GNU QUIC is free software: you can redistribute it and/or modify it under
+the terms of the GNU Lesser General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.  See COPYING.LESSER and COPYING.
+
+Copyright is held by the authors until assigned to the Free Software
+Foundation.  Contributions will need a copyright assignment before they
+can be accepted.  See HACKING.

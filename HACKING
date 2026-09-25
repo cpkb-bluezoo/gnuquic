@@ -1,0 +1,83 @@
+Hacking on GNU QUIC
+===================
+
+Coding style
+------------
+
+ISO C99, enforced with -std=c99 -pedantic.  Do not use C11 features
+(_Static_assert, <stdatomic.h>, _Alignas, anonymous unions, _Generic);
+if one is wanted, wrap it in a macro with a C99 fallback.  Follow the GNU Coding
+Standards: GNU indentation, a space before the opening parenthesis of
+calls and declarations, return type on its own line in definitions, and
+no tabs beyond what GNU indent produces.  Every public symbol starts with
+gq_ (types and functions) or GQ_ (macros, enumerators).  The library
+exports nothing else.
+
+Every source file carries the LGPLv3+ notice used in the existing files.
+
+Push-parsing contract (required for every codec)
+------------------------------------------------
+
+  * Input arrives in chunks.  The parser never blocks and never reads
+    from a file descriptor.
+  * Parsers take (const uint8_t **buf, size_t *len), consume what they
+    can, and advance both.  Whatever is left is an incomplete unit that
+    the caller keeps and presents again with more data appended.
+    GQ_NEED_MORE reports that case; it is not an error.
+  * One forward pass.  No seeking back, no split-then-parse pipeline.
+  * Output is a stream of semantic events to a handler.  Variable-length
+    payloads are slices into the caller's buffer.  Do not allocate an
+    object graph for parsed content and do not buffer whole messages.
+  * State machines are explicit (an enum plus small scratch fields), not
+    hidden in the call stack.
+  * Unit tests must feed the same input whole and in every chunk size
+    from 1 upwards and compare the resulting event logs.  See
+    tests/test-frame.c.
+
+Cryptography
+------------
+
+Never implement a primitive.  Everything comes from libgcrypt through
+src/crypto.c, or from the trust backend through src/trust.c.  New
+algorithms need a known-answer test from the defining RFC or NIST
+document.
+
+Warnings
+--------
+
+The tree must build with zero compiler warnings (configure adds -Wall
+-Wextra and more).  Fix the cause; if a warning is genuinely
+unavoidable, add a narrow, commented suppression.  Read the build
+output, not just the exit status.
+
+Testing
+-------
+
+  make check
+  make distcheck      # before every release
+
+make check also runs tests/interop.sh, which needs openssl and (optionally)
+gnutls-serv and gnutls-cli on the PATH and is skipped otherwise.  It tests
+our client against their servers (interop-client) and their clients against
+our server (interop-server).  Set GQ_NO_INTEROP=1 to
+skip it, or OPENSSL / GNUTLS_SERV to choose the binaries.
+
+Copyright assignment
+--------------------
+
+The project intends to become part of the GNU system with copyright
+assigned to the Free Software Foundation.  Until then, keep the notice
+"Copyright (C) YEAR Name" in each file, and do not incorporate code
+whose licence is not compatible with LGPLv3+.
+
+Documentation and translation
+
+The manual is Texinfo (doc/gnuquic.texi); update it with any change to
+design, policy or roadmap.  Build it with "make info" or "make pdf".
+
+Every string a person might read (for example the text returned by
+gq_strerror) must be wrapped in _() from src/gettext.h and its source file
+listed in po/POTFILES.in.  Do not translate RFC-defined identifiers.
+Check that the configure step reports "checking whether to use NLS: yes";
+on systems where libintl is not in the default path pass CPPFLAGS and
+LDFLAGS for it.

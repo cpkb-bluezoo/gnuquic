@@ -1,0 +1,589 @@
+\input texinfo   @c -*-texinfo-*-
+@c %**start of header
+@setfilename gnuquic.info
+@include version.texi
+@settitle GNU QUIC @value{VERSION}
+@documentencoding UTF-8
+@c %**end of header
+
+@copying
+This manual is for GNU QUIC (version @value{VERSION}, @value{UPDATED}),
+a QUIC engine and TLS stack written in C.
+
+Copyright @copyright{} 2026 Chris Burdess.
+
+@quotation
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the section entitled ``GNU Free
+Documentation License''.
+@end quotation
+@end copying
+
+@dircategory Software libraries
+@direntry
+* GNU QUIC: (gnuquic).          QUIC engine and TLS stack.
+@end direntry
+
+@titlepage
+@title GNU QUIC
+@subtitle A QUIC engine and TLS stack in C
+@subtitle for version @value{VERSION}, @value{UPDATED}
+@author Chris Burdess
+@page
+@vskip 0pt plus 1filll
+@insertcopying
+@end titlepage
+
+@contents
+
+@ifnottex
+@node Top
+@top GNU QUIC
+
+@insertcopying
+@end ifnottex
+
+@menu
+* Introduction::          What GNU QUIC is and is not.
+* Design::                Layers, the push-parser contract, layout.
+* Security policy::       What is negotiated, and what is absent.
+* Early data::            0-RTT and its anti-replay rules.
+* Roadmap::               Implementation status and plans.
+* Internationalization::  Message catalogues and the translation domain.
+* GNU Free Documentation License::  Copying this manual.
+* Concept index::
+@end menu
+
+@node Introduction
+@chapter Introduction
+
+GNU QUIC is an engine for QUIC (RFC 9000) and the TLS 1.3 handshake it
+depends on, with TLS and DTLS for other transports planned.  It is
+released under the GNU Lesser General Public License, version 3 or any
+later version.
+
+The library is the C member of a family: Gumdrop (Java) and Hopf (Rust)
+established the architecture, and this project ports it to C under the
+conventions of the GNU project.
+
+The goal is an engine on which an HTTP/3 client and server and a DNS
+over QUIC (DoQ) implementation can be written.  It is a library of
+state machines and codecs.  It owns no sockets, threads or timers: the
+embedding application supplies UDP or TCP input and output, a clock,
+and, if it wants concurrency, its own event loop.
+
+GNU QUIC is written in ISO C99 and is built with @option{-std=c99}
+@option{-pedantic}.  It builds with no compiler warnings, and the build
+system is expected to keep it that way.
+
+@node Design
+@chapter Design
+
+@menu
+* Layers::                From codecs down to the crypto library.
+* Crypto::                libgcrypt only, no homegrown primitives.
+* Trust::                 X.509 behind an interface.
+* Key exchange and signatures::  The @file{kx.h} and @file{sign.h} facades.
+* The push-parser contract::  How every parser and engine takes input.
+* Source layout::         Where things are.
+@end menu
+
+@node Layers
+@section Layers
+@cindex layers
+
+@example
+   HTTP/3, DoQ, ...                (applications, not in this tree)
+   ---------------------------------------------------------------
+   quic        connection, streams, flow control, recovery
+   tls / dtls  handshake engines and record layers (1.3 and 1.2)
+   codec       varint, frame, packet, transport parameters, handshake msgs
+   ---------------------------------------------------------------
+   crypto      hashes, HMAC, HKDF, AEAD, header protection, KEM   (libgcrypt)
+   trust       X.509 loading and chain validation                 (GnuTLS)
+   policy      the closed list of what may be negotiated
+@end example
+
+Upper layers see only @file{crypto.h}, @file{trust.h} and
+@file{policy.h}.  Nothing above @file{crypto.c} and @file{trust.c}
+includes @file{<gcrypt.h>} or @file{<gnutls/@dots{}>}.
+
+@node Crypto
+@section Crypto: libgcrypt only
+@cindex libgcrypt
+@cindex post-quantum
+
+@file{src/crypto.c} wraps libgcrypt and adds only protocol glue defined
+by RFCs: HKDF-Extract and HKDF-Expand (RFC 5869, built on libgcrypt HMAC
+because TLS needs extract and expand separately), HKDF-Expand-Label
+(RFC 8446 section 7.1) and the QUIC key schedule (RFC 9001 section 5).
+Each is checked against the vectors in its RFC (@file{tests/test-crypto.c}).
+No primitive is implemented in this tree.
+
+Findings from probing the installed libgcrypt 1.12.4:
+
+@itemize @bullet
+@item
+ML-KEM-512, 768 and 1024 are implemented (@code{gcry_kem_*}), so the
+hybrid key exchange groups @code{X25519MLKEM768},
+@code{SecP256r1MLKEM768} and @code{SecP384r1MLKEM1024} (RFC 10024) can be
+built from libgcrypt alone: classical ECDH plus ML-KEM, combined as the
+RFC specifies.
+
+@item
+ML-DSA has a reserved algorithm ID (@code{GCRY_PK_MLDSA}) but no
+implementation, and GnuTLS 3.8.13 declares ML-DSA-44, 65 and 87 but the
+installed build has no backend for them.  Neither library gives
+post-quantum signatures on the development machine.  The policy lists
+the ML-DSA schemes, the signature module reports
+@code{GQ_ERR_UNAVAILABLE} for them, and they become available when a
+backend provides them.  Post-quantum key exchange is unaffected.
+
+@item
+ECDH for X25519, secp256r1 and secp384r1 is done through libgcrypt's KEM
+interface (@code{GCRY_KEM_RAW_*}), which fits TLS key shares exactly.
+For the NIST curves libgcrypt returns the whole shared point and TLS uses
+the x coordinate only.  Invalid peer points are rejected by libgcrypt.
+
+@item
+X25519, Ed25519, Ed448, AES-GCM, ChaCha20-Poly1305 and HKDF are all
+present.
+@end itemize
+
+If a second library is ever required for post-quantum support it goes
+behind @file{crypto.h} as another backend, selected at configure time,
+and must be licence-compatible with the LGPL version 3 or later.
+
+@node Trust
+@section Trust: X.509 behind an interface
+@cindex certificates
+@cindex GnuTLS
+
+Gumdrop delegates certificate validation to the JVM and Hopf uses webpki
+and the platform roots.  In C the equivalent is
+@file{include/gnuquic/trust.h}: a trust store, and
+@code{gq_trust_verify_chain} taking DER certificates and an optional host
+name.  The first implementation calls GnuTLS (LGPL version 2.1 or later,
+which is compatible).  Because callers only see @code{gq_trust}, a later
+in-tree implementation (ASN.1 DER decoding, RFC 5280 path validation,
+RFC 9525 name matching) can replace it without touching the engines.
+
+The validation policy is fixed.  SHA-1 and MD5 signature chains fail,
+RSA keys under 2048 bits fail, dates are always checked, and the leaf must
+be usable for the stated purpose (TLS server or client authentication).
+
+@node Key exchange and signatures
+@section Key exchange and signatures
+
+@file{kx.h} is the key exchange facade: @code{gq_kx_generate} (client),
+@code{gq_kx_respond} (server) and @code{gq_kx_complete} (client) for all
+six groups in the policy, with the hybrid concatenation orders of
+RFC 10024.  It uses libgcrypt only.
+
+@file{sign.h} is the signature facade for CertificateVerify: load a PEM
+private key, take the public key from a peer's certificate, and sign and
+verify with the policy's schemes, checking that scheme and key type fit
+(ECDSA schemes bind the curve).  Signatures go through GnuTLS because it
+already parses the keys and certificates; the interface hides that, as
+@file{trust.h} does.  RSA under 2048 bits is refused everywhere.
+
+@node The push-parser contract
+@section The push-parser contract
+@cindex push parser
+
+The pattern is taken from Gumdrop's @code{H2Parser} and
+@code{QuicFrameParser}, Hopf's @code{ProtocolHandler::receive} and the
+@code{underflow} flag of jprotobuf:
+
+@itemize @bullet
+@item
+Input arrives as chunks.  A parser never blocks or reads a descriptor.
+
+@item
+A parser takes @code{(const uint8_t **buf, size_t *len)}, consumes
+complete units and advances both.  The caller keeps the tail and
+re-presents it with more data (@code{GQ_NEED_MORE}).
+
+@item
+One forward pass, events to a handler, payloads as slices into the
+caller's buffer, no object graphs and no whole-message buffering.
+
+@item
+Units are all-or-nothing, so no event fires for a half-received frame.
+@end itemize
+
+@code{gq_frame_parse} is the model: a @code{gq_frame} tagged union is
+delivered transiently on the stack.  ACK ranges are not expanded into an
+array; the event carries the validated raw range section and
+@code{gq_ack_foreach} walks it.  Tests run the same corpus whole and in
+every chunk size from 1 to 64.
+
+Engines (TLS, DTLS, and the QUIC connection) follow the reactive style
+of Gumdrop's @code{HandshakeEngine} and Hopf's @code{TlsEngine}: feed
+input in, receive events out through a sink structure of callbacks, with
+explicit state enumerations.  The caller pumps them.  No engine performs
+I/O.
+
+@node Source layout
+@section Source layout
+
+@table @file
+@item include/gnuquic/
+Public headers (installed).
+@item src/
+The library, @file{libgnuquic}.
+@item tests/
+One program per module, run by @command{make check}, and the interop
+programs.
+@item doc/
+This manual.
+@item po/
+Message catalogues.
+@end table
+
+Symbols carry the @code{gq_} or @code{GQ_} prefix, and the exported list
+is restricted by @code{-export-symbols-regex '^gq_'}.
+
+@node Security policy
+@chapter Security policy
+@cindex security policy
+
+The stance is the same as Gumdrop and Hopf: implement the modern,
+defensible subset and nothing else.  Every item below is absent by
+design, not disabled by default.  The lists are stated as code in
+@file{include/gnuquic/policy.h}, and @file{tests/test-policy.c} asserts
+that everything excluded here is rejected.
+
+@menu
+* Versions::
+* Cipher suites::
+* TLS 1.2 hardening::
+* Key exchange::
+* Signatures and certificates::
+* Server behaviour::
+* Other rules::
+@end menu
+
+@node Versions
+@section Versions
+
+@multitable @columnfractions .2 .8
+@headitem Transport @tab Versions
+@item QUIC @tab TLS 1.3 only (required by RFC 9001)
+@item TCP  @tab TLS 1.3, TLS 1.2 (planned)
+@item UDP  @tab DTLS 1.3, DTLS 1.2 (planned)
+@end multitable
+
+SSL 3.0, TLS 1.0, TLS 1.1 and DTLS 1.0 are not implemented.  A TLS
+endpoint is configured for one protocol generation, and the engine does
+not fall back from 1.3 to 1.2 by itself.  Running both means two
+listeners, which removes cross-version downgrade ambiguity at the
+deployment boundary, as in Gumdrop.
+
+@node Cipher suites
+@section Cipher suites
+
+AEAD only.
+
+@itemize @bullet
+@item
+TLS 1.3 and DTLS 1.3: @code{TLS_AES_256_GCM_SHA384},
+@code{TLS_CHACHA20_POLY1305_SHA256}, @code{TLS_AES_128_GCM_SHA256}.
+
+@item
+TLS 1.2 and DTLS 1.2: ECDHE with ECDSA or RSA authentication and AES-GCM
+or ChaCha20-Poly1305 (six suites).
+@end itemize
+
+Never implemented: CBC suites of any kind (MAC-then-encrypt has a long
+record of timing side channels, Lucky Thirteen and its successors), RC4,
+3DES, export and NULL suites, static RSA key transport (no forward
+secrecy), finite-field Diffie-Hellman, CCM, anonymous suites, and
+PSK-only TLS 1.2.
+
+@node TLS 1.2 hardening
+@section TLS 1.2 hardening
+
+These rules apply when the TLS 1.2 engine is added.
+
+@itemize @bullet
+@item
+Extended master secret (RFC 7627) is mandatory.  A peer that does not
+offer it is refused, closing the triple-handshake class of attacks.
+
+@item
+Secure renegotiation indication (RFC 5746) is required, and
+renegotiation itself is refused.
+
+@item
+No compression (CRIME) and no heartbeat.
+
+@item
+Session resumption by RFC 5077 tickets only, with rotating ticket keys.
+@end itemize
+
+@node Key exchange
+@section Key exchange
+
+Hybrid post-quantum groups are preferred (@code{X25519MLKEM768},
+@code{SecP256r1MLKEM768}, @code{SecP384r1MLKEM1024}), then X25519,
+secp256r1 and secp384r1.  There is no secp521r1, no finite-field group
+and no legacy curve.
+
+@node Signatures and certificates
+@section Signatures and certificates
+
+ECDSA (P-256 and P-384), Ed25519, RSA-PSS (RSAE), and ML-DSA-44, 65 and 87
+in TLS 1.3 when a backend supports them.  There are no RSA PKCS#1 v1.5
+signatures in the TLS 1.3 handshake, no SHA-1 and no MD5.
+
+Certificate chains signed with SHA-1 or MD5, or containing RSA keys under
+2048 bits, are rejected by the trust layer (GnuTLS verification profile
+@samp{MEDIUM}, 112-bit security).  Host names are checked against
+subjectAltName only (RFC 9525).
+
+@node Server behaviour
+@section Server behaviour
+
+@itemize @bullet
+@item
+The server chooses the cipher suite and group by its own preference
+list, but never asks for a retry when the client already sent an
+acceptable key share.
+
+@item
+A ClientHello without @code{supported_versions} offering TLS 1.3 is
+refused with @code{protocol_version}.  Nothing older is served.
+
+@item
+A client certificate must be valid for TLS client authentication (the
+@code{clientAuth} purpose), signed by a trusted CA, and must sign the
+handshake with a scheme the server listed.  A server never asks for
+client certificates unless it was given a way to verify them.
+
+@item
+Resumption uses (EC)DHE with the PSK, so every resumed session still gets
+forward secrecy; PSK-only resumption is not implemented.  Tickets are
+encrypted and authenticated under a key ring the server controls, bound
+to the server name, expire after at most seven days, and are refused if
+the suite is no longer allowed or, when client certificates are
+required, if the original session was not authenticated.  A wrong binder
+is a fatal error, not a fallback.
+@end itemize
+
+@node Other rules
+@section Other rules
+
+@itemize @bullet
+@item
+0-RTT early data is opt-in per endpoint and needs an anti-replay
+strategy; see @ref{Early data}.
+
+@item
+AEAD usage limits (RFC 8446 section 5.5, RFC 9001 section 6.6) trigger
+rekeying or close.
+
+@item
+OCSP stapling is not part of the handshake engines.  Revocation is a
+policy question for the embedding application, which receives the peer's
+chain.
+
+@item
+Key material is wiped after use.  The library never logs secrets.
+@end itemize
+
+@node Early data
+@chapter Early data (0-RTT)
+@cindex 0-RTT
+@cindex early data
+@cindex replay
+
+Early data lets a client that resumes a session send application data
+in its first flight.  It has weaker properties than the rest of the
+protocol: the data is not forward secret, and it can be replayed by an
+attacker who records the first flight.  GNU QUIC therefore never enables
+it by default and never accepts it without an anti-replay check.
+
+@subheading Server
+
+The server accepts early data for a connection only if all of the
+following hold:
+
+@itemize @bullet
+@item
+The endpoint enabled it (@code{max_early_data} is nonzero) and the
+embedding layer can deliver it.
+
+@item
+The client offered the @code{early_data} extension together with a
+resumption PSK, and the server accepted that PSK.
+
+@item
+The ticket allows early data and the ALPN protocol selected now is the
+one negotiated in the original connection.
+
+@item
+The ticket age reported by the client agrees with the server's own
+measurement to within the configured window (ten seconds by default).
+
+@item
+The application's replay hook reports the ticket as unused.  The library
+supplies @code{gq_replay_cache}, a bounded single-use ticket cache that
+fails closed when it is full.  If no hook is configured, early data is
+declined.
+
+@item
+No HelloRetryRequest was needed.
+@end itemize
+
+Declining early data does not decline the resumption.  The server
+continues with a 1-RTT handshake and skips the client's undecryptable
+early records within a budget, without processing them.  Over TCP the
+client ends its early data with EndOfEarlyData; in QUIC there is no such
+message and the transport carries the early data in 0-RTT packets.
+
+@subheading Client
+
+A client offers early data only when the stored session allows it and
+the ALPN protocol it wants matches the one recorded in the session.
+After a HelloRetryRequest or a rejection the client discards its early
+keys, reports the rejection through the sink so the application can
+resend the data as ordinary application data, and continues.
+
+@node Roadmap
+@chapter Roadmap
+
+Each step is testable against RFC vectors or a real peer (OpenSSL, the
+GnuTLS command line tools and quiche are available on the development
+machine) before the next one starts, as in Hopf's migration plan.
+
+@enumerate
+@item
+@strong{Done.}  Status codes, variable-length integers, frame codec,
+crypto facade, trust store and policy.
+
+@item
+@strong{Done.}  The packet layer for QUIC versions 1 and 2: long and short
+header codecs, packet number encoding, key derivation and key update,
+in-place packet protection, the Retry integrity tag, Version
+Negotiation, stateless reset and transport parameters.  Verified against
+the RFC 9001 appendix A and RFC 9369 appendix A vectors and fuzzed under
+ASan and UBSan.  Still to add: address validation tokens and RFC 9368
+version information.
+
+@item
+@strong{Done.}  The key exchange facade (X25519, P-256, P-384 and the
+three hybrid groups) and the signature facade (ECDSA P-256 and P-384,
+Ed25519, RSA-PSS; ML-DSA pending a backend).
+
+@item
+TLS 1.3 handshake engines, QUIC first:
+
+@enumerate a
+@item
+@strong{Done.}  Message codecs, transcript hash and the key schedule for
+SHA-256 and SHA-384.  The RFC 8448 section 3 trace is reproduced end to
+end.
+
+@item
+@strong{Done.}  The client engine, a reactive state machine with a sink
+of callbacks.  It covers HelloRetryRequest (including cookies), SNI,
+ALPN, QUIC transport parameters, certificate validation, client
+authentication, session tickets, KeyUpdate and the RFC 5705 exporter.  It
+sends key shares for a hybrid group plus a plain curve so that servers
+without post-quantum support need no retry.
+
+@item
+@strong{Done.}  The TLS record layer and TLS over TCP: AEAD records with
+inner content types and padding, the compatibility ChangeCipherSpec,
+alerts, close_notify and rekeying by record count.  All seven encrypted
+records of the RFC 8448 trace are reproduced byte for byte.
+
+@item
+@strong{Done.}  Interoperability: the client against @command{openssl
+s_server} and @command{gnutls-serv}.
+
+@item
+@strong{Done.}  The server engine: cipher suite and group selection by
+server preference, HelloRetryRequest with an optional cookie, credential
+selection by SNI, signature scheme selection, ALPN, optional or required
+client authentication, and refusal of anything below TLS 1.3.  Verified
+by a loopback test pairing the client and server engines (including
+mutated ClientHellos) and by the interop server driven by
+@command{openssl s_client} and @command{gnutls-cli}.
+
+@item
+@strong{Done.}  PSK resumption (@code{psk_dhe_ke}) on both sides:
+stateless tickets under an AES-256-GCM key ring, binders over the
+truncated ClientHello (also after a HelloRetryRequest), obfuscated ticket
+age and fallback to a full handshake.  Verified against RFC 8448 section
+4 and against real peers.
+
+@item
+@strong{In progress.}  0-RTT early data with anti-replay.  The engines,
+the record layer skip budget, the TCP glue and the replay cache are
+written and the server side is verified against the RFC 8448 section 4
+early traffic secret.  Loopback tests, interop scenarios and
+sanitizer runs are still to do.
+@end enumerate
+
+@item
+QUIC transport: connection IDs, streams and reassembly, flow control,
+loss detection and congestion control (RFC 9002), path validation,
+migration and DATAGRAM (RFC 9221), with interop against quiche and
+others.
+
+@item
+The TLS 1.2 engine (ECDHE plus AEAD, extended master secret).
+
+@item
+DTLS 1.3 and 1.2: record layers, reassembly, retransmission, replay
+window and cookies.
+
+@item
+Examples: an HTTP/3 (QPACK) client and server and a DoQ (RFC 9250)
+client and server, in a separate repository or under @file{examples/}.
+@end enumerate
+
+Open decisions: whether to vendor gnulib (probably yes once portability
+shims are needed); whether the timer interface is a callback or a
+``next timeout'' query (a query fits C better); Encrypted Client Hello
+and certificate compression, which Gumdrop has and are deferred here.
+
+@node Internationalization
+@chapter Internationalization
+@cindex gettext
+@cindex translation
+
+Every string the library can show a person is translatable with GNU
+gettext.  Currently this is the text returned by @code{gq_strerror}.
+Protocol names, alert names and other identifiers defined by RFCs are not
+translated.
+
+The translation domain is @samp{gnuquic}.  The library binds it to the
+installed locale directory in @code{gq_crypto_init}, so an application
+that calls @code{gq_crypto_init} before anything else needs no other
+setup.  The application remains responsible for calling
+@code{setlocale}.  The returned strings are owned by the library and
+valid until the next locale change.
+
+Translators work in the @file{po/} directory; @file{po/POTFILES.in}
+lists the source files that contain marked strings, and each new
+user-visible string must be added there.  Strings are marked with the
+@code{_} macro from @file{src/gettext.h}.  When the library is
+configured with @option{--disable-nls} the macro is the identity.
+
+@node GNU Free Documentation License
+@appendix GNU Free Documentation License
+
+@include fdl.texi
+
+@node Concept index
+@unnumbered Concept index
+
+@printindex cp
+
+@bye
