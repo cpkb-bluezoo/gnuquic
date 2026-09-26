@@ -58,6 +58,7 @@
 #include <gnuquic/packet.h>
 #include <gnuquic/tls.h>
 #include <gnuquic/tparams.h>
+#include <gnuquic/token.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -154,7 +155,29 @@ typedef struct gq_conn_config
   size_t cid_len;			/* Our connection IDs; 0: 8.  */
   unsigned active_cid_limit;		/* 0: 4 (2 to 8).  */
   int disable_active_migration;
+  /* Client: a token from an earlier connection's NEW_TOKEN, sent in the
+     first Initial (copied; at most 512 bytes).  */
+  const uint8_t *token;
+  size_t token_len;
+  /* Wall clock in seconds, for token ages.  NULL uses time().  */
+  uint64_t (*wall_seconds) (void *user);
+  void *wall_user;
 } gq_conn_config;
+
+/* What the admission step (listen.h) learned about a client's first
+   Initial, given to gq_conn_server_accept.  */
+typedef struct gq_conn_accept
+{
+  int validated;		/* The client proved its address (a token).  */
+  gq_cid odcid;			/* Original destination ID after a Retry
+				   (len 0: no Retry happened).  */
+  gq_cid retry_scid;		/* The ID the server chose in the Retry: it
+				   becomes our first source ID.  */
+  const gq_token_keys *token_keys;	/* Non-NULL: send NEW_TOKEN after the
+				   handshake.  Must outlive the connection.  */
+  uint8_t addr[64];		/* The client's address, as bound to tokens.  */
+  size_t addr_len;
+} gq_conn_accept;
 
 typedef struct gq_conn gq_conn;
 
@@ -179,6 +202,14 @@ int gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
 int gq_conn_server_new (gq_conn **out, const gq_conn_config *config,
                         const gq_tls_server_config *tls,
                         const gq_conn_events *events, uint64_t now_us);
+
+/* As gq_conn_server_new, with the outcome of address validation: after a
+   Retry the connection must use the ID the Retry chose, and it reports the
+   original destination ID in its transport parameters.  */
+int gq_conn_server_accept (gq_conn **out, const gq_conn_config *config,
+                           const gq_tls_server_config *tls,
+                           const gq_conn_events *events, uint64_t now_us,
+                           const gq_conn_accept *accept);
 
 void gq_conn_free (gq_conn *c);
 

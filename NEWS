@@ -3,6 +3,10 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** Address validation (token.h, listen.h): Retry and NEW_TOKEN tokens
+bound to the client address, a stateless admission step that answers
+Version Negotiation and Retry, and client handling of Retry; tested
+against quiche.
 ** QUIC connections (conn.h) and streams (stream.h, ranges.h): the
 handshake, packet number spaces, ACKs, RTT estimation, loss detection and
 probe timeouts and NewReno congestion control with persistent

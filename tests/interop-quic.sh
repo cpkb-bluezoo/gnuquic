@@ -73,7 +73,8 @@ report ()
   if [ "$1" = 0 ]; then echo "ok   $2"; else echo "FAIL $2"; fails=$((fails + 1)); fi
 }
 
-# Our server, quiche's client.
+# Our server, quiche's client (which starts with a reserved version, so
+# every scenario also exercises Version Negotiation).
 ours_server ()
 {
   name=ours-server-$1; shift
@@ -85,7 +86,7 @@ ours_server ()
   pid=$!
   PIDS="$PIDS $pid"
   sleep 0.5
-  "$QDIR/quiche-client" --wire-version 1 --http-version HTTP/0.9 --no-verify \
+  "$QDIR/quiche-client" --http-version HTTP/0.9 --no-verify \
     --idle-timeout 20000 --dump-responses "out-$name" \
     https://127.0.0.1:$port/small https://127.0.0.1:$port/hello \
     https://127.0.0.1:$port/big > "cli-$name.log" 2>&1
@@ -102,8 +103,9 @@ ours_client ()
   want "$name" || return 0
   port=$((port + 1))
   mkdir "out-$name"
+  case $name in *retry*) noretry= ;; *) noretry=--no-retry ;; esac
   "$QDIR/quiche-server" --listen 127.0.0.1:$port --cert ec.pem --key ec.key \
-    --root root --http-version HTTP/0.9 --no-retry \
+    --root root --http-version HTTP/0.9 $noretry \
     --idle-timeout 20000 > "qsrv-$name.log" 2>&1 &
   pid=$!
   PIDS="$PIDS $pid"
@@ -118,9 +120,13 @@ ours_client ()
 
 ours_server plain
 ours_server loss --loss 20 --seed 3
+ours_server retry --retry
+ours_server retry-loss --retry --loss 15 --seed 4
 ours_client plain
 ours_client loss --loss 10 --seed 5
 ours_client key-update --key-update
+ours_client retry
+ours_client retry-loss --loss 10 --seed 6
 
 echo "$runs scenarios, $fails failed"
 [ $fails = 0 ]

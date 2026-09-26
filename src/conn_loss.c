@@ -228,6 +228,10 @@ requeue_frames (gq_conn *c, int sp, sent_pkt *p)
         case SF_HANDSHAKE_DONE:
           c->handshake_done_pending = 1;
           break;
+        case SF_NEW_TOKEN:
+          if (c->token_keys)
+            c->new_token_pending = 1;
+          break;
         default:
           break;
         }

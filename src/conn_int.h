@@ -55,7 +55,7 @@ enum sf_type
   SF_CRYPTO = 1, SF_STREAM, SF_RESET_STREAM, SF_STOP_SENDING, SF_MAX_DATA,
   SF_MAX_STREAM_DATA, SF_MAX_STREAMS, SF_DATA_BLOCKED,
   SF_STREAM_DATA_BLOCKED, SF_NEW_CID, SF_RETIRE_CID, SF_HANDSHAKE_DONE,
-  SF_ACK, SF_PATH_RESPONSE
+  SF_ACK, SF_PATH_RESPONSE, SF_NEW_TOKEN
 };
 
 typedef struct sent_frame
@@ -159,6 +159,15 @@ struct gq_conn
   uint8_t got_peer_packet;
 
   gq_cid odcid;			/* Original destination CID (client's).  */
+  gq_cid initial_dcid;		/* Destination ID the Initial keys come from.  */
+  gq_cid retry_scid;		/* Retry: the ID the server chose (len 0: none).  */
+  uint8_t retried;
+  uint8_t token[512];		/* Client: token for Initial packets.  */
+  size_t token_len;
+  const gq_token_keys *token_keys;	/* Server: issue NEW_TOKEN.  */
+  uint8_t addr[64];
+  size_t addr_len;
+  uint8_t new_token_pending;
   gq_cid scid_first;		/* Our first source CID.  */
   lcid l[MAX_LCID];
   pcid p[MAX_PCID];
@@ -246,6 +255,7 @@ int conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
 void conn_recompute_idle (gq_conn *c, uint64_t now);
 uint64_t conn_pto_base (const gq_conn *c, int sp);
 int conn_new_lcid (gq_conn *c, int announced);
+uint64_t conn_wall_seconds (const gq_conn *c);
 int conn_apply_peer_params (gq_conn *c);
 int conn_discard_space (gq_conn *c, int sp);
 void conn_maybe_confirm (gq_conn *c);

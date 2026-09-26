@@ -24,7 +24,7 @@ UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
   test-packet test-protect test-tparams test-kx test-sign \
   test-tlsmsg test-keysched test-tls-client test-record test-tlsconn test-tls-server \
   test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
-  test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-conn
+  test-tls12conn test-dtlsrec test-dtlshs test-dtls test-dtls12rec test-dtls12 test-ranges test-stream test-conn test-token
 
 # Interoperability against independent servers (skipped if none installed).
 if HAVE_GNUTLS

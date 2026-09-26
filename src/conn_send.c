@@ -123,7 +123,7 @@ app_pending (gq_conn *c)
 {
   size_t i;
 
-  if (c->handshake_done_pending || c->n_path_response || conn_update_wanted (c))
+  if (c->handshake_done_pending || c->new_token_pending || c->n_path_response || conn_update_wanted (c))
     return 1;
   for (i = 0; i < MAX_LCID; i++)
     if (c->l[i].used && c->l[i].need_send)
@@ -387,6 +387,27 @@ add_app_frames (gq_conn *c, pk *p)
       if (add (p, &f, 1, &e) == 0)
         c->handshake_done_pending = 0;
     }
+  if (c->new_token_pending && room (p) >= GQ_TOKEN_MAX + 8)
+    {
+      uint8_t tok[GQ_TOKEN_MAX];
+      size_t tl;
+
+      if (gq_token_make (c->token_keys, GQ_TOKEN_NEW_TOKEN, c->addr,
+                         c->addr_len, NULL, NULL, conn_wall_seconds (c), tok,
+                         &tl) == GQ_OK)
+        {
+          memset (&f, 0, sizeof f);
+          f.type = GQ_FRAME_NEW_TOKEN;
+          f.u.new_token.token.data = tok;
+          f.u.new_token.token.len = tl;
+          memset (&e, 0, sizeof e);
+          e.type = SF_NEW_TOKEN;
+          if (add (p, &f, 1, &e) == 0)
+            c->new_token_pending = 0;
+        }
+      else
+        c->new_token_pending = 0;
+    }
   for (i = 0; i < c->n_path_response; i++)
     if (room (p) >= 9)
       {
@@ -495,8 +516,9 @@ overhead_of (const gq_conn *c, int sp)
     return 1 + c->dcid.len + pn + GQ_AEAD_TAG_LEN;
   /* First byte, version, both connection IDs with their lengths, the
      token length, a two-byte Length, the packet number, the tag.  */
-  return 1 + 4 + 1 + c->dcid.len + 1 + c->scid_first.len + 1 + 2 + pn
-         + GQ_AEAD_TAG_LEN;
+  return 1 + 4 + 1 + c->dcid.len + 1 + c->scid_first.len
+         + (sp == SP_INITIAL ? gq_varint_size (c->token_len) + c->token_len : 0)
+         + 2 + pn + GQ_AEAD_TAG_LEN;
 }
 
 static void
@@ -596,7 +618,9 @@ hdr_len_for (const gq_conn *c, int sp, size_t payload_len, size_t pn_len,
   else
     gq_long_header_build (sp == SP_INITIAL ? GQ_PKT_INITIAL : GQ_PKT_HANDSHAKE,
                           c->version, c->dcid.data, c->dcid.len,
-                          c->scid_first.data, c->scid_first.len, NULL, 0, pn,
+                          c->scid_first.data, c->scid_first.len,
+                          sp == SP_INITIAL ? c->token : NULL,
+                          sp == SP_INITIAL ? c->token_len : 0, pn,
                           pn_len, payload_len, tmp, sizeof tmp, &h);
   return h;
 }
@@ -616,7 +640,9 @@ seal (gq_conn *c, uint64_t now, pk *p, uint64_t pn, size_t pn_len, uint8_t *out,
     r = gq_long_header_build (p->sp == SP_INITIAL ? GQ_PKT_INITIAL
                                                   : GQ_PKT_HANDSHAKE,
                               c->version, c->dcid.data, c->dcid.len,
-                              c->scid_first.data, c->scid_first.len, NULL, 0,
+                              c->scid_first.data, c->scid_first.len,
+                              p->sp == SP_INITIAL ? c->token : NULL,
+                              p->sp == SP_INITIAL ? c->token_len : 0,
                               pn, pn_len, p->len, out, cap, &hdr);
   if (r != GQ_OK)
     return r;
