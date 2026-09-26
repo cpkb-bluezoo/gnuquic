@@ -114,29 +114,49 @@ rd_point (struct rd *r, gq_slice *point)
   return GQ_OK;
 }
 
-int
-gq_tls12_ske_parse (gq_slice body, gq_tls12_ske *ske)
+static int
+parse_ske (gq_slice body, gq_tls12_ske *ske, int wide)
 {
   struct rd r = { body.data, body.len };
   const uint8_t *start = body.data;
   unsigned long v;
+  size_t want;
 
   memset (ske, 0, sizeof *ske);
   TRY (rd_uint (&r, 1, &v));
   if (v != GQ_TLS12_CURVE_NAMED)
     return GQ_ERR_PROTOCOL;
   TRY (rd_uint (&r, 2, &v));
-  if (v != GQ_GROUP_SECP256R1)
+  ske->group = (uint16_t) v;
+  if (v == GQ_GROUP_SECP256R1)
+    want = GQ_TLS12_POINT_LEN;
+  else if (wide && v == GQ_GROUP_SECP384R1)
+    want = 97;
+  else if (wide && v == GQ_GROUP_X25519)
+    want = 32;
+  else
     return GQ_ERR_PROTOCOL;
   TRY (rd_point (&r, &ske->point));
   ske->params.data = start;
   ske->params.len = (size_t) (r.p - start);
-  if (ske->point.len != GQ_TLS12_POINT_LEN)
+  if (ske->point.len != want)
     return GQ_ERR_PROTOCOL;
   TRY (rd_uint (&r, 2, &v));
   ske->scheme = (uint16_t) v;
   TRY (rd_vec (&r, 2, &ske->signature));
   return rd_end (&r);
+}
+
+int
+gq_tls12_ske_parse (gq_slice body, gq_tls12_ske *ske)
+{
+  return parse_ske (body, ske, 0);
+}
+
+int
+gq_tls12_ske_parse_wide (gq_slice body, gq_tls12_ske *ske)
+{
+  return parse_ske (body, ske, 1);
 }
 
 int

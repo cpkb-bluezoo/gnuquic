@@ -265,6 +265,14 @@ typedef struct gq_tls_config
      callback at GQ_LEVEL_EARLY; the amount is limited by the session's
      max_early_data.  */
   int early_data;
+  /* TLS 1.3 client only, over a byte stream or datagrams (DTLS 1.3 also
+     offers DTLS 1.2): also offer TLS 1.2 in this
+     ClientHello (its suites, the version, and the extensions of the TLS 1.2
+     profile), so a server that lacks TLS 1.3 can answer in TLS 1.2 within the
+     same handshake.  Set by gq_tlsauto, which continues with a TLS 1.2
+     engine if the server picks it; a bare engine would fail.  Refused with
+     quic.  */
+  int also_tls12;
   /* DTLS (RFC 9147 for the 1.3 engine, RFC 6347 for the 1.2 engine of
      tls12.h): set by gq_dtls and gq_dtls12, not by applications.  For 1.3:
      version 0xfefc, the legacy_cookie field, no compatibility session ID,
@@ -353,6 +361,11 @@ typedef struct gq_tls_server_config
                      gq_session_state *state);
   void *psk_user;
   size_t max_message_len;
+  /* TLS 1.2 server only: this endpoint also serves TLS 1.3, so the
+     ServerHello random ends with the downgrade sentinel of RFC 8446
+     section 4.1.3, which lets a TLS 1.3 client that was tricked into TLS 1.2
+     notice.  Set by gq_tlsauto; leave zero otherwise.  */
+  int tls13_sentinel;
   /* DTLS 1.3 server: as gq_tls_config.dtls.  Refused with quic; early
      data is off and hello_retry_cookie is ignored (the address-bound
      stateless cookie of dtlscookie.h is used instead).  */

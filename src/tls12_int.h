@@ -52,6 +52,9 @@ struct gq_tls12
   uint8_t cookie[255];		/* Client: from HelloVerifyRequest.  */
   size_t cookie_len;
   int hvr_seen;
+  int tls13_offered;		/* Client: our hello also offered TLS 1.3.  */
+  uint8_t *adopted;		/* DTLS: that hello, to repeat with a cookie.  */
+  size_t adopted_len;
   gq_tls_config cfg;		/* Client config; parts reused by servers.  */
   gq_tls_server_config scfg;
   gq_tls12_sink sink;
@@ -73,6 +76,7 @@ struct gq_tls12
   gq_tls12_keys keys;		/* Derived, wiped once installed.  */
   int have_keys;
 
+  uint16_t kx_group;		/* Its group; 0 means secp256r1.  */
   gq_kx_key kx;			/* Our ephemeral key.  */
   int have_kx;
   uint8_t pms[GQ_KX_SHARED_MAX];

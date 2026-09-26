@@ -28,6 +28,7 @@ libgnuquic_la_SOURCES = \
   dtls12cookie.c \
   dtls12rec.c \
   dtlscookie.c \
+  dtlsauto.c \
   dtlshs.c \
   dtlsrec.c \
   gettext.h \
@@ -59,6 +60,7 @@ libgnuquic_la_SOURCES = \
   tls12_server.c \
   tls12conn.c \
   tls12ks.c \
+  tlsauto.c \
   tls12msg.c \
   tls.c \
   tls_int.h \
@@ -86,6 +88,7 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/dtls12cookie.h \
   $(top_srcdir)/include/gnuquic/dtls12rec.h \
   $(top_srcdir)/include/gnuquic/dtlscookie.h \
+  $(top_srcdir)/include/gnuquic/dtlsauto.h \
   $(top_srcdir)/include/gnuquic/dtlshs.h \
   $(top_srcdir)/include/gnuquic/dtlsrec.h \
   $(top_srcdir)/include/gnuquic/frame.h \
@@ -109,6 +112,7 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/tls.h \
   $(top_srcdir)/include/gnuquic/tls12.h \
   $(top_srcdir)/include/gnuquic/tls12conn.h \
+  $(top_srcdir)/include/gnuquic/tlsauto.h \
   $(top_srcdir)/include/gnuquic/tls12ks.h \
   $(top_srcdir)/include/gnuquic/tls12msg.h \
   $(top_srcdir)/include/gnuquic/tlsconn.h \

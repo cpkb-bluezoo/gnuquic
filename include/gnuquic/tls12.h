@@ -120,6 +120,19 @@ void gq_tls12_free (gq_tls12 *tls);
 /* Client: build and send the ClientHello.  */
 int gq_tls12_start (gq_tls12 *tls);
 
+/* For a combined ClientHello (gq_tlsauto): the cipher suites and signature
+   schemes a TLS 1.2 client with CFG would offer, after policy filtering.
+   Arrays of at least 16 entries.  */
+int gq_tls12_client_offer (const gq_tls_config *cfg, uint16_t *suites,
+                           size_t *n_suites, uint16_t *sigs, size_t *n_sigs);
+
+/* Client, instead of gq_tls12_start: continue from a ClientHello that a TLS
+   1.3 engine already built and sent (HELLO, the handshake message, LEN bytes)
+   with both versions on offer.  The engine takes over at the ServerHello, and
+   as the client offered TLS 1.3 it refuses a ServerHello carrying the
+   downgrade sentinel (RFC 8446 section 4.1.3).  */
+int gq_tls12_client_adopt (gq_tls12 *tls, const uint8_t *hello, size_t len);
+
 /* DTLS 1.2 (RFC 6347), used by gq_dtls12: with dtls set in the
    configuration the engine speaks version 0xfefd, keeps the transcript in
    DTLS form (12-byte handshake headers with message_seq), follows a

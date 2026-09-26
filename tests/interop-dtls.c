@@ -47,6 +47,7 @@
 #include <gnuquic/dtls.h>
 #include <gnuquic/dtls12.h>
 #include <gnuquic/dtls12cookie.h>
+#include <gnuquic/dtlsauto.h>
 #include <gnuquic/dtlscookie.h>
 
 #include "interop-util.h"
@@ -54,7 +55,7 @@
 struct opts
 {
   int server;
-  int v12;			/* DTLS 1.2.  */
+  unsigned versions;		/* GQ_DTLSAUTO_* pin; 0 negotiates.  */
   const char *host, *port, *sni, *ca, *cert, *key;
   const char *alpn[4];
   size_t n_alpn;
@@ -78,7 +79,7 @@ struct state
   struct sockaddr_storage peer;
   socklen_t plen;
   int have_peer;
-  void *d;			/* gq_dtls, or gq_dtls12 with --dtls12.  */
+  gq_dtlsauto *d;		/* Negotiating, or pinned by --dtls12/--dtls13.  */
   int connected, closed, close_error, close_alert, tickets;
   gq_tls_info info;
   gq_tls_session saved;
@@ -90,21 +91,13 @@ struct state
   uint32_t rng;
 };
 
-#define D_START(s, now) ((s)->o->v12 ? gq_dtls12_start ((s)->d, now) \
-                                     : gq_dtls_start ((s)->d, now))
-#define D_RECEIVE(s, b, n, now) \
-  ((s)->o->v12 ? gq_dtls12_receive ((s)->d, b, n, now) \
-               : gq_dtls_receive ((s)->d, b, n, now))
-#define D_SEND(s, b, n) ((s)->o->v12 ? gq_dtls12_send ((s)->d, b, n) \
-                                     : gq_dtls_send ((s)->d, b, n))
-#define D_CLOSE(s) ((s)->o->v12 ? gq_dtls12_close ((s)->d) \
-                                : gq_dtls_close ((s)->d))
-#define D_FREE(s) ((s)->o->v12 ? gq_dtls12_free ((s)->d) \
-                               : gq_dtls_free ((s)->d))
-#define D_DEADLINE(s) ((s)->o->v12 ? gq_dtls12_deadline ((s)->d) \
-                                   : gq_dtls_deadline ((s)->d))
-#define D_TIMEOUT(s, now) ((s)->o->v12 ? gq_dtls12_timeout ((s)->d, now) \
-                                       : gq_dtls_timeout ((s)->d, now))
+#define D_START(s, now) gq_dtlsauto_start ((s)->d, now)
+#define D_RECEIVE(s, b, n, now) gq_dtlsauto_receive ((s)->d, b, n, now)
+#define D_SEND(s, b, n) gq_dtlsauto_send ((s)->d, b, n)
+#define D_CLOSE(s) gq_dtlsauto_close ((s)->d)
+#define D_FREE(s) gq_dtlsauto_free ((s)->d)
+#define D_DEADLINE(s) gq_dtlsauto_deadline ((s)->d)
+#define D_TIMEOUT(s, now) gq_dtlsauto_timeout ((s)->d, now)
 
 static uint64_t
 now_ms (void)
@@ -351,8 +344,7 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
   memset (&params, 0, sizeof params);
   params.mtu = o->mtu;
   params.rekey_records = o->rekey;
-  r = o->v12 ? gq_dtls12_client_new ((gq_dtls12 **) &st.d, cfg, &ev, &params)
-             : gq_dtls_client_new ((gq_dtls **) &st.d, cfg, &ev, &params);
+  r = gq_dtlsauto_client_new (&st.d, cfg, &ev, &params, o->versions);
   if (r != GQ_OK)
     {
       printf ("result=fail reason=new status=%d\n", r);
@@ -385,8 +377,7 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
               last_send = 0;
               if (k == o->messages / 2 && o->key_update)
                 {
-                  if (!o->v12)
-                    gq_dtls_key_update (st.d, 1);
+                  gq_dtlsauto_key_update (st.d, 1);
                 }
             }
           if (k < o->messages && (last_send == 0 || now - last_send > 600))
@@ -417,6 +408,7 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
       if (have_save)
         *have_save = 1;
     }
+  printf ("version=%x\n", gq_dtlsauto_version (st.d));
   printf ("tickets=%d\n", st.tickets);
   printf ("echoed=%d\n", st.echoed);
   if (st.connected && st.echoed >= o->messages && st.close_error == 0)
@@ -495,18 +487,14 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
         continue;			/* Another source: not served.  */
       if (ck)
         {
-          gq_tls_dtls_prime prime;
-          gq_dtls12_prime prime12;
+          gq_dtlsauto_prime prime;
           size_t rl;
           int r;
 
-          if (o->v12)
-            r = gq_dtls12_listen (ck, (const uint8_t *) &from, fl, buf,
+          r = gq_dtlsauto_listen (ck, cfg, o->versions,
+                                  (const uint8_t *) &from, fl, buf,
                                   (size_t) n, reply, sizeof reply, &rl,
-                                  &prime12);
-          else
-            r = gq_dtls_listen (ck, cfg, (const uint8_t *) &from, fl, buf,
-                                (size_t) n, reply, sizeof reply, &rl, &prime);
+                                  &prime);
           if (r == GQ_DTLS_LISTEN_REPLY)
             {
               if (!lose (&st))
@@ -519,11 +507,8 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
               st.peer = from;
               st.plen = fl;
               st.have_peer = 1;
-              if ((o->v12
-                   ? gq_dtls12_server_new ((gq_dtls12 **) &st.d, cfg, &ev,
-                                           &params, &prime12)
-                   : gq_dtls_server_new ((gq_dtls **) &st.d, cfg, &ev,
-                                         &params, &prime)) != GQ_OK)
+              if (gq_dtlsauto_server_new (&st.d, cfg, &ev, &params,
+                                          o->versions, &prime) != GQ_OK)
                 {
                   ok = 0;
                   break;
@@ -537,11 +522,8 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
           st.peer = from;
           st.plen = fl;
           st.have_peer = 1;
-          if ((o->v12
-               ? gq_dtls12_server_new ((gq_dtls12 **) &st.d, cfg, &ev, &params,
-                                       NULL)
-               : gq_dtls_server_new ((gq_dtls **) &st.d, cfg, &ev, &params,
-                                     NULL)) != GQ_OK)
+          if (gq_dtlsauto_server_new (&st.d, cfg, &ev, &params, o->versions,
+                                      NULL) != GQ_OK)
             {
               ok = 0;
               break;
@@ -549,6 +531,7 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
           D_RECEIVE (&st, buf, (size_t) n, now);
         }
     }
+  printf ("version=%x\n", st.d ? gq_dtlsauto_version (st.d) : 0);
   printf ("echoed=%d\n", st.echoed);
   if (!(ok && st.connected && st.close_error == 0))
     {
@@ -633,7 +616,8 @@ main (int argc, char **argv)
       else if (OPT ("--client-auth")) o.client_auth = v;
       else if (OPT ("--rekey")) o.rekey = (unsigned long) atol (v);
       else if (!strcmp (a, "--loss-handshake")) o.loss_hs = 2;
-      else if (!strcmp (a, "--dtls12")) o.v12 = 1;
+      else if (!strcmp (a, "--dtls12")) o.versions = GQ_DTLSAUTO_DTLS12;
+      else if (!strcmp (a, "--dtls13")) o.versions = GQ_DTLSAUTO_DTLS13;
       else if (!strcmp (a, "--http")) { o.http = 1; o.messages = 1; }
       else if (!strcmp (a, "--rev")) { o.rev = 1; o.messages = 1; }
       else if (!strcmp (a, "--twice")) o.twice = 1;

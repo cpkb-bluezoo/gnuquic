@@ -87,6 +87,16 @@ void gq_dtls12_free (gq_dtls12 *c);
    clock the caller keeps.  */
 int gq_dtls12_start (gq_dtls12 *c, uint64_t now);
 
+/* Client, instead of gq_dtls12_start: continue from a combined ClientHello
+   (DTLS 1.3 and 1.2 both on offer) that a DTLS 1.3 association already sent
+   as the record numbered NEXT_SEQ - 1.  HELLO is the handshake message
+   (4 byte header).  The hello counts as sent: it is kept as the flight to
+   repeat, and a HelloVerifyRequest is answered with the same hello and a
+   cookie.  As the client offered DTLS 1.3 it refuses a ServerHello with the
+   downgrade sentinel (see gq_tls12_client_adopt).  */
+int gq_dtls12_client_adopt (gq_dtls12 *c, const uint8_t *hello, size_t len,
+                            uint64_t next_seq, uint64_t now);
+
 /* Process one received datagram.  Invalid records are dropped silently
    (RFC 6347 section 4.1.2.7).  Returns GQ_OK or the negative status the
    association closed with.  */

@@ -214,7 +214,8 @@ wolf_client ()
 }
 
 # ---- our client, wolfSSL server ----
-ours_client "dtls/wolf-server: default" "" "" ok "connected suite=" "echoed=3" "result=ok"
+ours_client "dtls/wolf-server: default (negotiates 1.3)" "" "" ok "connected suite=" "echoed=3" "version=fefc" "result=ok"
+ours_client "dtls/wolf-server: stateless cookie (negotiates 1.3)" "--stateless" "" ok "hrr=1" "version=fefc" "result=ok"
 ours_client "dtls/wolf-server: HelloRetryRequest cookie" "--cookie" "" ok "hrr=1" "result=ok"
 ours_client "dtls/wolf-server: stateless cookie" "--stateless" "" ok "hrr=1" "result=ok"
 ours_client "dtls/wolf-server: AES-256-GCM" "--cipher TLS13-AES256-GCM-SHA384" "" ok "suite=0x1302"

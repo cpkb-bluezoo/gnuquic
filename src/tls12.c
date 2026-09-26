@@ -231,12 +231,15 @@ g12_gen_kx (gq_tls12 *t)
 {
   int r;
 
+  unsigned group = t->kx_group ? t->kx_group : GQ_GROUP_SECP256R1;
+
   if (t->cfg.hooks.kx_generate)
-    r = t->cfg.hooks.kx_generate (t->cfg.hooks.user, GQ_GROUP_SECP256R1,
+    r = t->cfg.hooks.kx_generate (t->cfg.hooks.user, group,
                                   &t->kx) ? GQ_ERR_CRYPTO : GQ_OK;
   else
-    r = gq_kx_generate (GQ_GROUP_SECP256R1, &t->kx);
-  if (r == GQ_OK && t->kx.share_len != GQ_TLS12_POINT_LEN)
+    r = gq_kx_generate (group, &t->kx);
+  if (r == GQ_OK && group == GQ_GROUP_SECP256R1
+      && t->kx.share_len != GQ_TLS12_POINT_LEN)
     r = GQ_ERR_CRYPTO;
   if (r != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, r);
@@ -345,7 +348,7 @@ g12_complete (gq_tls12 *t)
 {
   t->st = S12_DONE;
   t->info.cipher_suite = t->suite;
-  t->info.group = GQ_GROUP_SECP256R1;
+  t->info.group = t->kx_group ? t->kx_group : GQ_GROUP_SECP256R1;
   t->info.resumed = t->resumed;
   t->info.client_auth_sent = t->server ? t->client_verified
                                        : t->info.client_auth_sent;
@@ -459,6 +462,7 @@ gq_tls12_free (gq_tls12 *t)
   if (t == NULL)
     return;
   gq_pubkey_free (t->peer_key);
+  free (t->adopted);
   if (t->msg)
     {
       gq_wipe (t->msg, t->msg_cap);
@@ -541,6 +545,57 @@ send_ch (gq_tls12 *t)
 }
 
 int
+gq_tls12_client_offer (const gq_tls_config *cfg, uint16_t *suites,
+                       size_t *n_suites, uint16_t *sigs, size_t *n_sigs)
+{
+  gq_tls12 *t = calloc (1, sizeof *t);
+
+  if (t == NULL)
+    return GQ_ERR_NOMEM;
+  g12_filter (t, cfg->suites, cfg->n_suites, cfg->sigschemes,
+              cfg->n_sigschemes);
+  memcpy (suites, t->suites, t->n_suites * sizeof t->suites[0]);
+  *n_suites = t->n_suites;
+  memcpy (sigs, t->sigs, t->n_sigs * sizeof t->sigs[0]);
+  *n_sigs = t->n_sigs;
+  free (t);
+  return GQ_OK;
+}
+
+int
+gq_tls12_client_adopt (gq_tls12 *t, const uint8_t *hello, size_t len)
+{
+  size_t sid;
+
+  if (t == NULL || t->server || t->st != S12_NEW || hello == NULL
+      || len < 4 + 2 + 32 + 1 || hello[0] != GQ_HS_CLIENT_HELLO)
+    return GQ_ERR_INVAL;
+  sid = hello[38];
+  if (sid > 32 || 39 + sid > len)
+    return GQ_ERR_INVAL;
+  memcpy (t->client_random, hello + 6, 32);
+  memcpy (t->sid, hello + 39, sid);
+  t->sid_len = sid;
+  t->offered = NULL;		/* A TLS 1.3 ticket is no use here.  */
+  t->tls13_offered = 1;
+  if (t->dtls)
+    {
+      /* A HelloVerifyRequest is answered by repeating this very hello with
+         the cookie in it (RFC 6347 section 4.2.1).  */
+      t->adopted = malloc (len);
+      if (t->adopted == NULL)
+        return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+      memcpy (t->adopted, hello, len);
+      t->adopted_len = len;
+    }
+  if (g12_tb_add_tx (t, hello, len) != GQ_OK)
+    return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+  t->tx_seq++;
+  t->st = S12_C_WAIT_SH;
+  return GQ_OK;
+}
+
+int
 gq_tls12_start (gq_tls12 *t)
 {
   if (t == NULL || t->server || t->st != S12_NEW)
@@ -556,6 +611,50 @@ gq_tls12_start (gq_tls12 *t)
   else
     t->offered = NULL;
   return send_ch (t);
+}
+
+/* The adopted combined hello again, with the cookie: the same message but
+   for the legacy_cookie field, as a cookie tied to what the hello offered
+   requires.  */
+static int
+send_adopted_ch (gq_tls12 *t)
+{
+  size_t sid = t->adopted[38], head = 39 + sid;	/* Up to the cookie length.  */
+  size_t n = t->adopted_len + t->cookie_len;
+  uint8_t *m;
+
+  if (head >= t->adopted_len || t->adopted[head] != 0)
+    return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_PROTOCOL);
+  m = malloc (n);
+  if (m == NULL)
+    return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+  memcpy (m, t->adopted, head);
+  m[head] = (uint8_t) t->cookie_len;
+  memcpy (m + head + 1, t->cookie, t->cookie_len);
+  memcpy (m + head + 1 + t->cookie_len, t->adopted + head + 1,
+          t->adopted_len - head - 1);
+  /* The handshake length grows by the cookie.  */
+  {
+    size_t body = n - 4;
+
+    m[1] = (uint8_t) (body >> 16);
+    m[2] = (uint8_t) (body >> 8);
+    m[3] = (uint8_t) body;
+  }
+  if (g12_tb_add_tx (t, m, n) != GQ_OK)
+    {
+      free (m);
+      return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+    }
+  t->tx_seq++;
+  t->st = S12_C_WAIT_SH;
+  if (t->sink.send (t->sink.user, m, n))
+    {
+      free (m);
+      return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER);
+    }
+  free (m);
+  return GQ_OK;
 }
 
 /* DTLS: the server wants a cookie (RFC 6347 section 4.2.1).  The first
@@ -577,6 +676,8 @@ c_on_hello_verify_request (gq_tls12 *t, gq_slice body)
   t->hvr_seen = 1;
   gq_wipe (t->tb, t->tb_len);
   t->tb_len = 0;
+  if (t->adopted)
+    return send_adopted_ch (t);
   return send_ch (t);
 }
 
@@ -685,6 +786,12 @@ c_on_server_hello (gq_tls12 *t, gq_slice msg, gq_slice body)
 
   t->suite = sh.cipher_suite;
   memcpy (t->server_random, sh.random, 32);
+  /* We could have had TLS 1.3, and a server that could too says so in its
+     random (RFC 8446 section 4.1.3): someone pushed us down.  */
+  if (t->tls13_offered
+      && (memcmp (sh.random + 24, "DOWNGRD\x01", 8) == 0
+          || memcmp (sh.random + 24, "DOWNGRD\x00", 8) == 0))
+    return g12_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
   if (g12_tb_add (t, msg.data, msg.len) != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
 
@@ -742,7 +849,8 @@ c_on_server_key_exchange (gq_tls12 *t, gq_slice msg, gq_slice body)
 {
   gq_tls12_ske ske;
   uint8_t data[64 + 128];
-  int r = gq_tls12_ske_parse (body, &ske);
+  int r = t->tls13_offered ? gq_tls12_ske_parse_wide (body, &ske)
+                           : gq_tls12_ske_parse (body, &ske);
 
   if (r != GQ_OK)
     return g12_fail_parse (t, r);
@@ -768,6 +876,7 @@ c_on_server_key_exchange (gq_tls12 *t, gq_slice msg, gq_slice body)
     return g12_fail (t, GQ_ALERT_DECRYPT_ERROR, GQ_ERR_CRYPTO);
 
   /* Our half of the exchange; the shared secret is the premaster.  */
+  t->kx_group = ske.group;
   TRY (g12_gen_kx (t));
   if (gq_kx_complete (&t->kx, ske.point.data, ske.point.len, t->pms,
                       sizeof t->pms, &t->pms_len) != GQ_OK)

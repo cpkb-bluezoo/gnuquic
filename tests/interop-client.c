@@ -46,6 +46,7 @@
 #include <gnuquic/policy.h>
 #include <gnuquic/tlsconn.h>
 #include <gnuquic/tls12conn.h>
+#include <gnuquic/tlsauto.h>
 
 #include "interop-util.h"
 
@@ -58,7 +59,7 @@ struct opts
   size_t n_groups;
   uint16_t suites[8];
   size_t n_suites;
-  int tls12;
+  int tls12, tls13;
   const char *send;		/* Request text, escapes decoded.  */
   const char *expect;
   const char *out;
@@ -228,19 +229,16 @@ alarm_handler (int sig)
   _exit (1);
 }
 
-/* One connection object of either version.  */
+/* One connection, negotiating its version unless told otherwise.  */
 struct conn
 {
-  gq_tlsconn *a;
-  gq_tls12conn *b;
+  gq_tlsauto *u;
 };
 
-#define C_START(c) (o.tls12 ? gq_tls12conn_start ((c).b) : gq_tlsconn_start ((c).a))
-#define C_RECV(c, d, n) (o.tls12 ? gq_tls12conn_receive ((c).b, d, n) \
-                                 : gq_tlsconn_receive ((c).a, d, n))
-#define C_SEND(c, d, n) (o.tls12 ? gq_tls12conn_send ((c).b, d, n) \
-                                 : gq_tlsconn_send ((c).a, d, n))
-#define C_CLOSE(c) (o.tls12 ? gq_tls12conn_close ((c).b) : gq_tlsconn_close ((c).a))
+#define C_START(c) gq_tlsauto_start ((c).u)
+#define C_RECV(c, d, n) gq_tlsauto_receive ((c).u, d, n)
+#define C_SEND(c, d, n) gq_tlsauto_send ((c).u, d, n)
+#define C_CLOSE(c) gq_tlsauto_close ((c).u)
 
 /* One connection: connect, handshake, exchange, close.  Returns 0 for
    success, 2 for a TLS failure, 1 for I/O errors.  */
@@ -273,8 +271,9 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
   ev.closed = xclosed;
   ev.rekey_records = o.rekey;
   memset (&c, 0, sizeof c);
-  r = o.tls12 ? gq_tls12conn_client_new (&c.b, cfg, &ev)
-              : gq_tlsconn_client_new (&c.a, cfg, &ev);
+  r = gq_tlsauto_client_new (&c.u, cfg, &ev,
+                             o.tls12 ? GQ_TLSAUTO_TLS12
+                             : o.tls13 ? GQ_TLSAUTO_TLS13 : 0);
   if (r != GQ_OK)
     {
       printf ("result=fail reason=new status=%d\n", r);
@@ -308,7 +307,7 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
                   (int) st.info.alpn_len, (const char *) st.info.alpn,
                   st.info.client_auth_requested, st.info.client_auth_sent,
                   st.info.resumed);
-          if (o.key_update && !o.tls12 && gq_tlsconn_key_update (c.a, 1) != GQ_OK)
+          if (o.key_update && gq_tlsauto_key_update (c.u, 1) != GQ_OK)
             break;
           if (o.lines > 0)
             {
@@ -357,12 +356,14 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
 
   if (done)
     {
+      printf ("version=%x\n", gq_tlsauto_version (c.u));
       printf ("result=ok\n");
       return 0;
     }
   if (st.connected && !o.expect && !o.min_bytes && o.lines == 0
       && st.close_error == 0)
     {
+      printf ("version=%x\n", gq_tlsauto_version (c.u));
       printf ("result=ok\n");
       return 0;
     }
@@ -437,6 +438,7 @@ main (int argc, char **argv)
       else if (!strcmp (a, "--key-update")) o.key_update = 1;
       else if (!strcmp (a, "--twice")) o.twice = 1;
       else if (!strcmp (a, "--tls12")) o.tls12 = 1;
+      else if (!strcmp (a, "--tls13")) o.tls13 = 1;
       else
         {
           fprintf (stderr, "unknown option %s\n", a);

@@ -61,6 +61,11 @@ void gq_tls12conn_free (gq_tls12conn *c);
 /* Client: send the ClientHello.  A no-op for servers.  */
 int gq_tls12conn_start (gq_tls12conn *c);
 
+/* Client: instead of gq_tls12conn_start, continue from a combined ClientHello
+   already sent (see gq_tls12_client_adopt).  */
+int gq_tls12conn_client_adopt (gq_tls12conn *c, const uint8_t *hello,
+                               size_t len);
+
 /* Feed bytes from the transport, in any chunking.  Returns GQ_OK, or the
    negative status the connection closed with.  */
 int gq_tls12conn_receive (gq_tls12conn *c, const uint8_t *data, size_t len);

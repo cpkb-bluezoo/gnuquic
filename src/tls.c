@@ -30,6 +30,8 @@
 #include <gnuquic/transcript.h>
 #include <gnuquic/tlsmsg.h>
 #include <gnuquic/tls.h>
+#include <gnuquic/tls12.h>
+#include <gnuquic/tls12msg.h>
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
@@ -256,6 +258,16 @@ gq_tls_client_new (gq_tls **out, const gq_tls_config *cfg,
   if (t->cfg.max_message_len == 0)
     t->cfg.max_message_len = 65536;
 
+  if (cfg->also_tls12)
+    {
+      if (cfg->quic || cfg->transport_params
+          || gq_tls12_client_offer (cfg, t->suites12, &t->n_suites12,
+                                    t->sigs12, &t->n_sigs12) != GQ_OK)
+        {
+          free (t);
+          return GQ_ERR_INVAL;
+        }
+    }
   gqi_filter_lists (t, cfg->suites, cfg->n_suites, cfg->groups, cfg->n_groups,
                     cfg->sigschemes, cfg->n_sigschemes);
   if (t->n_suites == 0 || t->n_groups == 0 || t->n_sigs == 0)
@@ -333,6 +345,8 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
   gq_wbuf_open (w, 2);
   for (i = 0; i < t->n_suites; i++)
     gq_wbuf_u16 (w, t->suites[i]);
+  for (i = 0; i < t->n_suites12; i++)
+    gq_wbuf_u16 (w, t->suites12[i]);
   gq_wbuf_close (w);
   gq_wbuf_open (w, 1);
   gq_wbuf_u8 (w, 0);
@@ -370,6 +384,17 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
   gq_wbuf_open (w, 2);
   for (i = 0; i < t->n_sigs; i++)
     gq_wbuf_u16 (w, t->sigs[i]);
+  /* Also what a TLS 1.2 server may sign its key exchange with.  */
+  for (i = 0; i < t->n_sigs12; i++)
+    {
+      size_t k;
+      int dup = 0;
+
+      for (k = 0; k < t->n_sigs; k++)
+        dup |= t->sigs[k] == t->sigs12[i];
+      if (!dup)
+        gq_wbuf_u16 (w, t->sigs12[i]);
+    }
   gq_wbuf_close (w);
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, 50);			/* signature_algorithms_cert */
@@ -383,6 +408,8 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
   gq_wbuf_ext_open (w, GQ_EXT_SUPPORTED_VERSIONS);
   gq_wbuf_open (w, 1);
   gq_wbuf_u16 (w, t->dtls ? 0xfefc : 0x0304);
+  if (t->n_suites12)
+    gq_wbuf_u16 (w, t->dtls ? 0xfefd : 0x0303);
   gq_wbuf_close (w);
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, GQ_EXT_KEY_SHARE);
@@ -407,6 +434,25 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
           gq_wbuf_close (w);
         }
       gq_wbuf_close (w);
+      gq_wbuf_close (w);
+    }
+  if (t->n_suites12)
+    {
+      /* The TLS 1.2 profile's hardening extensions (extended master secret,
+         secure renegotiation indication), the point format and the empty
+         ticket request, which a TLS 1.2 server answers.  A TLS 1.3 server
+         ignores all of them.  */
+      gq_wbuf_ext_open (w, GQ_EXT12_EXTENDED_MASTER_SECRET);
+      gq_wbuf_close (w);
+      gq_wbuf_ext_open (w, GQ_EXT12_RENEGOTIATION_INFO);
+      gq_wbuf_u8 (w, 0);
+      gq_wbuf_close (w);
+      gq_wbuf_ext_open (w, GQ_EXT12_EC_POINT_FORMATS);
+      gq_wbuf_open (w, 1);
+      gq_wbuf_u8 (w, 0);
+      gq_wbuf_close (w);
+      gq_wbuf_close (w);
+      gq_wbuf_ext_open (w, GQ_EXT12_SESSION_TICKET);
       gq_wbuf_close (w);
     }
   if (t->quic)
