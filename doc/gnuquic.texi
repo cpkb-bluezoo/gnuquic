@@ -51,6 +51,7 @@ Documentation License''.
 * Design::                Layers, the push-parser contract, layout.
 * Security policy::       What is negotiated, and what is absent.
 * Early data::            0-RTT and its anti-replay rules.
+* QUIC connections::      Connection and stream state.
 * Roadmap::               Implementation status and plans.
 * Internationalization::  Message catalogues and the translation domain.
 * GNU Free Documentation License::  Copying this manual.
@@ -631,6 +632,64 @@ After a HelloRetryRequest or a rejection the client discards its early
 keys, reports the rejection through the sink so the application can
 resend the data as ordinary application data, and continues.
 
+@node QUIC connections
+@chapter QUIC connections
+
+@cindex connection, QUIC
+@cindex stream state
+A @code{gq_conn} (@file{conn.h}) is one QUIC connection, as a state
+machine that owns no socket, thread or timer.  The caller moves datagrams
+and time:
+
+@table @code
+@item gq_conn_recv
+A datagram arrived.  It is decrypted in place.
+@item gq_conn_send
+Ask for the next datagram to transmit; call until it yields none.
+@item gq_conn_timeout
+When to call @code{gq_conn_on_timeout} next.
+@end table
+
+Time is a caller-supplied monotonic clock in microseconds, so tests run
+the same code under a simulated clock.  Application events (connected,
+stream opened, stream data, reset, stop sending, closed, connection ID
+issued and retired) reach the caller through callbacks that run inside
+the call that caused them.
+
+@heading Streams
+@file{stream.h} holds the two halves of a stream as separate objects.
+The send half buffers only bytes not yet acknowledged, hands out lost
+ranges again before new data, and holds new data back by the peer's
+credit.  The receive half delivers bytes straight to the callback when
+they continue what was delivered before, copies only data that arrives
+ahead of a gap, and enforces the final size, flow control and reset rules
+of RFC 9000 section 3.  Both use @file{ranges.h}, a bounded sorted set of
+half-open ranges, so a peer cannot make their bookkeeping grow without
+limit.
+
+@heading What a connection does
+The TLS 1.3 engine runs in QUIC mode; its output is queued as CRYPTO data
+per packet number space and its secrets become packet keys.  Received
+packets are protected and deprotected in place; coalesced packets are
+handled; duplicates are dropped by packet number.  ACKs are sent at once
+for the handshake spaces and after two packets or 25 ms otherwise (at
+once on a gap).  Loss detection follows RFC 9002 (packet and time
+thresholds, probe timeouts with back-off); what a lost packet carried is
+put back on the queues frame by frame.  A server obeys the
+anti-amplification limit and pads datagrams that carry ack-eliciting
+Initial packets to 1200 bytes; a client pads all its Initial datagrams.
+Keys are discarded as the handshake progresses, and the 1-RTT keys are
+updated on request, when the peer updates, and before the AEAD limit.
+
+@heading Limits of this step
+Congestion control, Retry and address validation tokens, Version
+Negotiation, 0-RTT, path validation and migration, and DATAGRAM are not
+implemented yet, and a server needs an endpoint layer above it to route
+datagrams by connection ID (the connection reports the IDs it issues
+through @code{cid_issued}).  The receiving side treats a few limits as
+fixed: 64 tracked packet number ranges per space and 8 connection IDs
+in each direction.
+
 @node Roadmap
 @chapter Roadmap
 
@@ -709,10 +768,31 @@ sanitizer runs are still to do.
 @end enumerate
 
 @item
-QUIC transport: connection IDs, streams and reassembly, flow control,
-loss detection and congestion control (RFC 9002), path validation,
-migration and DATAGRAM (RFC 9221), with interop against quiche and
-others.
+QUIC transport:
+
+@enumerate a
+@item
+@strong{Done.}  Connection and stream state (@ref{QUIC connections}):
+range sets, the stream send and receive halves, and the connection with
+its packet number spaces, handshake, ACKs, RTT estimation, loss
+detection and probe timeouts (RFC 9002 sections 5 and 6), flow control,
+connection IDs, key update, idle timeout, close and stateless reset.
+Verified by simulated-network tests (loss, reordering, corruption, tight
+flow control) and against quiche in both directions.
+
+@item
+Congestion control (RFC 9002 section 7), pacing and ECN.  Until it
+exists the amount in flight is capped by a fixed constant, which is not
+safe on a shared network.
+
+@item
+Address validation: Retry, NEW_TOKEN tokens, and RFC 9368 version
+information with Version Negotiation.
+
+@item
+0-RTT wiring, path validation and migration, DATAGRAM (RFC 9221), and the
+endpoint layer that routes datagrams to connections by connection ID.
+@end enumerate
 
 @item
 @strong{Done.}  The TLS 1.2 engines and record layer over TCP (the

@@ -65,8 +65,20 @@ Pre-alpha.  What exists today:
   dtls12cookie  stateless HelloVerifyRequest for servers; interoperating
            with OpenSSL, GnuTLS and wolfSSL
 
-Not yet written: 0-RTT early data, loss recovery and
-congestion control, connection and stream state.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
+  ranges   sets of half-open ranges (received packet numbers, stream
+           gaps, acknowledged and lost data)
+  stream   stream send and receive state machines (RFC 9000 section 3):
+           in-order push delivery, flow control, final size, reset
+  conn     QUIC connection: handshake over CRYPTO frames, packet number
+           spaces, ACKs, RTT, loss detection and probe timeouts,
+           streams, flow control, connection IDs, key update, idle
+           timeout, close and stateless reset; interoperating with quiche
+
+Not yet written: congestion control (a fixed cap on bytes in flight
+stands in), address validation tokens and Retry, Version Negotiation
+and RFC 9368, 0-RTT early data, path validation and migration, DATAGRAM,
+and the endpoint layer that routes datagrams to connections.  See the
+manual (doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building
 --------
