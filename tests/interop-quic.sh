@@ -138,5 +138,69 @@ ours_client retry
 ours_client migration --migrate
 ours_client retry-loss --loss 10 --seed 6
 
+# Several connections to one endpoint at once.
+if want ours-server-concurrent; then
+  name=ours-server-concurrent
+  port=$((port + 1))
+  "$OURS" server $port --cert ec.pem --key ec.key --root root --timeout 30 \
+    --connections 4 > "srv-$name.log" 2>&1 &
+  pid=$!
+  PIDS="$PIDS $pid"
+  sleep 0.5
+  rc=0
+  for k in 1 2 3 4; do
+    mkdir "out-$name-$k"
+    ( "$QDIR/quiche-client" --http-version HTTP/0.9 --no-verify \
+        --idle-timeout 20000 --dump-responses "out-$name-$k" \
+        https://127.0.0.1:$port/big https://127.0.0.1:$port/small \
+        > "cli-$name-$k.log" 2>&1 ) &
+  done
+  wait $(jobs -p | grep -v "^$pid\$") 2>/dev/null
+  for k in 1 2 3 4; do
+    check_files "out-$name-$k" big small || rc=1
+  done
+  kill $pid 2>/dev/null
+  report $rc "$name"
+fi
+
+# DATAGRAM frames (RFC 9221).  quiche only exchanges them under HTTP/3, so
+# the request itself is not answered; the datagrams are what counts.
+if want ours-server-datagram; then
+  name=ours-server-datagram
+  port=$((port + 1))
+  "$OURS" server $port --cert ec.pem --key ec.key --root root --timeout 15 \
+    --connections 1 --dgram 3 --alpn h3 > "srv-$name.log" 2>&1 &
+  pid=$!
+  PIDS="$PIDS $pid"
+  sleep 0.5
+  RUST_LOG=info "$QDIR/quiche-client" --http-version HTTP/3 --no-verify \
+    --idle-timeout 3000 --dgram-proto oneway --dgram-count 3 \
+    https://127.0.0.1:$port/small > "cli-$name.log" 2>&1
+  wait $pid 2>/dev/null
+  rc=0
+  [ "$(grep -c '^DATAGRAM' "srv-$name.log")" = 3 ] || rc=1
+  [ "$(grep -c 'Received DATAGRAM' "cli-$name.log")" = 3 ] || rc=1
+  report $rc "$name"
+fi
+if want ours-client-datagram; then
+  name=ours-client-datagram
+  port=$((port + 1))
+  RUST_LOG=info "$QDIR/quiche-server" --listen 127.0.0.1:$port --cert ec.pem \
+    --key ec.key --root root --http-version HTTP/3 --no-retry \
+    --dgram-proto oneway --dgram-count 3 --idle-timeout 4000 \
+    > "qsrv-$name.log" 2>&1 &
+  pid=$!
+  PIDS="$PIDS $pid"
+  sleep 0.5
+  mkdir "out-$name"
+  "$OURS" client 127.0.0.1 $port --ca ca.pem --out "out-$name" --timeout 5 \
+    --alpn h3 --dgram 3 /small > "cli-$name.log" 2>&1
+  kill $pid 2>/dev/null
+  rc=0
+  [ "$(grep -c '^DATAGRAM' "cli-$name.log")" = 3 ] || rc=1
+  [ "$(grep -c 'Received DATAGRAM' "qsrv-$name.log")" = 3 ] || rc=1
+  report $rc "$name"
+fi
+
 echo "$runs scenarios, $fails failed"
 [ $fails = 0 ]

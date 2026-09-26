@@ -103,6 +103,7 @@ gq_conn_update_keys (gq_conn *c, uint64_t now_us)
   if (!c->handshake_confirmed || !c->sp[SP_APP].have_wk || !c->w_phase_acked
       || c->w_phase != c->r_phase)
     return GQ_ERR_INVAL;
+  conn_wake (c);
   return write_key_update (c);
 }
 
@@ -207,6 +208,7 @@ cid_store (gq_conn *c, const gq_frame *f)
   slot->cid.len = NC->cid_len;
   memcpy (slot->cid.data, NC->cid, NC->cid_len);
   memcpy (slot->token, NC->reset_token, GQ_RESET_TOKEN_LEN);
+  conn_peer_token (c, slot->token);
   if (NC->retire_prior_to > c->peer_retire_prior)
     c->peer_retire_prior = NC->retire_prior_to;
   for (i = 0; i < MAX_PCID; i++)
@@ -255,8 +257,7 @@ cid_retire (gq_conn *c, uint64_t seq)
     if (c->l[i].used && c->l[i].seq == seq)
       {
         c->l[i].used = 0;
-        if (c->ev.cid_retired)
-          c->ev.cid_retired (c->ev.user, c->l[i].cid.data, c->l[i].cid.len);
+        conn_cid_retired (c, &c->l[i].cid);
         break;
       }
   for (i = 0; i < MAX_LCID; i++)
@@ -367,8 +368,19 @@ on_frame (void *user, const gq_frame *f)
         return 1;
       }
     case GQ_FRAME_DATAGRAM:
-      conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "unexpected DATAGRAM");
-      return 1;
+      /* Only if we said we would take them, and not bigger than promised
+         (RFC 9221 section 4).  */
+      if (c->cfg.max_datagram_frame_size == 0
+          || 1 + f->u.datagram.data.len > c->cfg.max_datagram_frame_size)
+        {
+          conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "unexpected DATAGRAM");
+          return 1;
+        }
+      c->datagrams_received++;
+      if (c->ev.datagram)
+        c->ev.datagram (c->ev.user, f->u.datagram.data.data,
+                        f->u.datagram.data.len);
+      return c->state >= GQ_CONN_CLOSING;
     default:
       return stream_handle_frame (c, f);
     }

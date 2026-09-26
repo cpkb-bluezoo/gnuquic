@@ -54,8 +54,12 @@
    client can migrate or probe paths itself.  The server's
    preferred_address is not used.
 
-   Not done here (later steps): 0-RTT, DATAGRAM frames, and the endpoint layer that routes
-   datagrams to connections.  */
+   Unreliable DATAGRAM frames (RFC 9221) are supported when enabled.
+
+   Many connections behind one socket are handled by the endpoint layer
+   (endpoint.h), which routes datagrams to them.
+
+   Not done here (later steps): 0-RTT.  */
 
 #ifndef GNUQUIC_CONN_H
 #define GNUQUIC_CONN_H
@@ -158,6 +162,15 @@ typedef struct gq_conn_events
   void (*cid_issued) (void *user, const uint8_t *cid, size_t len,
                       const uint8_t token[GQ_RESET_TOKEN_LEN]);
   void (*cid_retired) (void *user, const uint8_t *cid, size_t len);
+  /* An unreliable datagram arrived (RFC 9221).  */
+  void (*datagram) (void *user, const uint8_t *data, size_t len);
+  /* Fate of a datagram queued with gq_conn_datagram_send, by the id it
+     returned: the packet carrying it was acknowledged, or declared lost.
+     Datagrams are never retransmitted; what to do is up to the
+     application.  Those still queued when the connection ends are silently
+     dropped.  */
+  void (*datagram_acked) (void *user, uint64_t id);
+  void (*datagram_lost) (void *user, uint64_t id);
   /* Path validation and migration (RFC 9000 sections 8.2 and 9).  A path
      was validated; a path failed validation; the connection now sends on
      PATH (the peer migrated, we did, or we fell back after a failed
@@ -203,6 +216,12 @@ typedef struct gq_conn_config
   size_t cid_len;			/* Our connection IDs; 0: 8.  */
   unsigned active_cid_limit;		/* 0: 4 (2 to 8).  */
   int disable_active_migration;
+  /* Unreliable DATAGRAM frames (RFC 9221).  MAX_DATAGRAM_FRAME_SIZE is the
+     largest frame we accept, advertised to the peer; 0 (the default)
+     switches DATAGRAM off.  DATAGRAM_QUEUE bounds the bytes waiting to be
+     sent (0: 64 KiB), whether or not we accept any.  */
+  uint64_t max_datagram_frame_size;
+  size_t datagram_queue;
   /* Client: a token from an earlier connection's NEW_TOKEN, sent in the
      first Initial (copied; at most 512 bytes).  */
   const uint8_t *token;
@@ -211,6 +230,13 @@ typedef struct gq_conn_config
      and the server's address.  Otherwise the first datagram received
      defines it.  */
   gq_path path;
+  /* Stateless reset tokens (RFC 9000 section 10.3): if set, called for each
+     connection ID we issue to supply its token, so an endpoint can derive
+     tokens from a key and answer for connections it no longer has.
+     Otherwise tokens are random.  */
+  void (*reset_token) (void *user, const uint8_t *cid, size_t len,
+                       uint8_t token[GQ_RESET_TOKEN_LEN]);
+  void *reset_user;
   /* Wall clock in seconds, for token ages.  NULL uses time().  */
   uint64_t (*wall_seconds) (void *user);
   void *wall_user;
@@ -331,6 +357,38 @@ uint32_t gq_conn_version (const gq_conn *c);
    endpoint routes by it until the client switches).  */
 const uint8_t *gq_conn_initial_dcid (const gq_conn *c, size_t *len);
 
+/* ---- Endpoint support ---- */
+
+/* What an endpoint layer needs to route datagrams to this connection: the
+   connection IDs it answers to (gq_conn_local_cids, then cid_issued and
+   cid_retired as they change), and a note that the connection may have
+   something to send, given after any call that can produce output (stream
+   writes, datagrams, close, ...).  All optional.  */
+typedef struct gq_conn_router
+{
+  void *user;
+  void (*cid_issued) (void *user, gq_conn *conn, const uint8_t *cid,
+                      size_t len);
+  void (*cid_retired) (void *user, gq_conn *conn, const uint8_t *cid,
+                       size_t len);
+  void (*wake) (void *user, gq_conn *conn);
+  /* The peer gave a stateless reset token for one of its connection IDs: a
+     datagram ending in it, arriving for no known connection, is a reset for
+     this one (see gq_conn_stateless_reset).  */
+  void (*peer_token) (void *user, gq_conn *conn,
+                      const uint8_t token[GQ_RESET_TOKEN_LEN]);
+} gq_conn_router;
+
+/* The peer sent a stateless reset that the endpoint matched to this
+   connection: it ends (draining), reported through the closed event.  */
+void gq_conn_stateless_reset (gq_conn *c, uint64_t now_us);
+
+void gq_conn_set_router (gq_conn *c, const gq_conn_router *router);
+
+/* The connection IDs currently accepted; returns how many were stored (at
+   most MAX).  */
+size_t gq_conn_local_cids (const gq_conn *c, gq_cid *out, size_t max);
+
 /* ---- Streams ---- */
 
 /* Open a stream we initiate.  Returns GQ_OK and the id, or GQ_ERR_RANGE
@@ -359,6 +417,22 @@ int gq_conn_stream_stop_sending (gq_conn *c, uint64_t id, uint64_t error);
 /* Room left in the send buffer of a stream.  */
 size_t gq_conn_stream_room (const gq_conn *c, uint64_t id);
 
+/* ---- DATAGRAM (RFC 9221) ---- */
+
+/* The largest datagram payload gq_conn_datagram_send accepts now: what the
+   peer agreed to and what fits a packet.  0 if the peer does not accept
+   datagrams.  */
+size_t gq_conn_datagram_max (const gq_conn *c);
+
+/* Queue an unreliable datagram; *ID (may be NULL) names it in the acked and
+   lost events.  It goes out in the next packet with room, subject to
+   congestion control, and is dropped rather than retransmitted.  Returns
+   GQ_OK; GQ_ERR_UNAVAILABLE if the peer did not enable DATAGRAM (or the
+   handshake is not done); GQ_ERR_RANGE if LEN exceeds
+   gq_conn_datagram_max; GQ_ERR_BUFSIZE if the send queue is full.  */
+int gq_conn_datagram_send (gq_conn *c, const uint8_t *data, size_t len,
+                           uint64_t *id);
+
 /* Ask for our sending keys to be replaced (RFC 9001 section 6).  The
    library also does this by itself before the AEAD limits.  Returns
    GQ_ERR_INVAL when an update is not allowed yet.  */
@@ -376,6 +450,7 @@ typedef struct gq_conn_stats
   uint64_t key_updates;
   unsigned pto_count;
   uint64_t path_validations, path_failures, migrations;
+  uint64_t datagrams_sent, datagrams_received, datagrams_dropped;
 } gq_conn_stats;
 
 void gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st);

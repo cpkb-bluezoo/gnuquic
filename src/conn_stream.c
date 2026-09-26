@@ -499,6 +499,8 @@ gq_conn_stream_write (gq_conn *c, uint64_t id, const uint8_t *data,
   w = gq_sstream_write (&st->s, data, len);
   if (w >= 0 && (size_t) w < len)
     st->full = 1;
+  if (w > 0)
+    conn_wake (c);
   return w;
 }
 
@@ -509,6 +511,7 @@ gq_conn_stream_finish (gq_conn *c, uint64_t id)
 
   if (st == NULL || !st->has_send)
     return GQ_ERR_INVAL;
+  conn_wake (c);
   return gq_sstream_finish (&st->s);
 }
 
@@ -520,6 +523,7 @@ gq_conn_stream_reset (gq_conn *c, uint64_t id, uint64_t error)
   if (st == NULL || !st->has_send)
     return GQ_ERR_INVAL;
   gq_sstream_reset (&st->s, error);
+  conn_wake (c);
   return GQ_OK;
 }
 
@@ -531,6 +535,7 @@ gq_conn_stream_stop_sending (gq_conn *c, uint64_t id, uint64_t error)
   if (st == NULL || !st->has_recv)
     return GQ_ERR_INVAL;
   gq_rstream_stop (&st->r, error);
+  conn_wake (c);
   return GQ_OK;
 }
 

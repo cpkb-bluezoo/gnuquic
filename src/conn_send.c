@@ -124,7 +124,7 @@ app_pending (gq_conn *c)
 {
   size_t i;
 
-  if (c->handshake_done_pending || c->new_token_pending
+  if (c->handshake_done_pending || c->new_token_pending || c->dq_n
       || c->paths[c->cur_path].n_resp || c->paths[c->cur_path].need_challenge
       || conn_update_wanted (c))
     return 1;
@@ -514,6 +514,26 @@ add_app_frames (gq_conn *c, pk *p)
               == 0)
             c->blocked_sent_at = c->max_data_peer + 1;
         }
+    }
+  /* Datagrams before stream data: they are the latency sensitive ones.  */
+  while (c->dq_n)
+    {
+      struct dgram *d = datagram_front (c);
+      gq_frame df;
+
+      if (room (p) < 1 + 2 + d->len || p->nsf >= MAX_FRAMES_PER_PACKET)
+        break;
+      memset (&df, 0, sizeof df);
+      df.type = GQ_FRAME_DATAGRAM;
+      df.u.datagram.data.data = d->data;
+      df.u.datagram.data.len = d->len;
+      memset (&e, 0, sizeof e);
+      e.type = SF_DATAGRAM;
+      e.a = d->id;
+      if (add (p, &df, 1, &e))
+        break;
+      c->datagrams_sent++;
+      datagram_pop (c);
     }
   /* Streams, starting one further along each time for fairness.  */
   start = c->n_streams ? c->rr % c->n_streams : 0;
