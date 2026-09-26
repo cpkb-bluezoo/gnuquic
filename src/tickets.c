@@ -128,6 +128,55 @@ gq_ticket_keys_new (gq_ticket_keys **out)
   return GQ_OK;
 }
 
+int
+gq_ticket_keys_derive (const gq_ticket_keys *parent, const char *label,
+                       gq_ticket_keys **out)
+{
+  gq_ticket_keys *k;
+  int i, done, r = GQ_OK;
+  unsigned last = 0;
+  int first = 1;
+
+  if (parent == NULL || label == NULL || out == NULL)
+    return GQ_ERR_INVAL;
+  TRY (gq_crypto_init ());
+  k = calloc (1, sizeof *k);
+  if (k == NULL)
+    return GQ_ERR_NOMEM;
+  /* Oldest first, so the derived ring ages the same way.  */
+  for (done = 0; done < GQ_TICKET_KEYS_MAX && r == GQ_OK; done++)
+    {
+      int pick = -1;
+
+      for (i = 0; i < GQ_TICKET_KEYS_MAX; i++)
+        if (parent->slot[i].used
+            && (first || parent->slot[i].serial > last)
+            && (pick < 0 || parent->slot[i].serial < parent->slot[pick].serial))
+          pick = i;
+      if (pick < 0)
+        break;
+      first = 0;
+      last = parent->slot[pick].serial;
+      {
+        uint8_t key[GQ_TICKET_KEY_LEN];
+
+        r = gq_hkdf_expand (GQ_HASH_SHA256, parent->slot[pick].key,
+                            GQ_TICKET_KEY_LEN, label, strlen (label), key,
+                            sizeof key);
+        if (r == GQ_OK)
+          r = gq_ticket_keys_add (k, key, pick == parent->active);
+        gq_wipe (key, sizeof key);
+      }
+    }
+  if (r != GQ_OK)
+    {
+      gq_ticket_keys_free (k);
+      return r;
+    }
+  *out = k;
+  return GQ_OK;
+}
+
 void
 gq_ticket_keys_free (gq_ticket_keys *k)
 {

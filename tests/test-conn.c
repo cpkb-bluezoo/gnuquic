@@ -75,6 +75,9 @@ struct app
   uint8_t token[512];
   size_t token_len;
   int tokens;
+  gq_tls_session sess;
+  int have_sess;
+  uint32_t sess_version;
 };
 
 struct pkt
@@ -222,6 +225,22 @@ ev_new_token (void *u, const uint8_t *t, size_t n)
   memcpy (a->token, t, n);
   a->token_len = n;
   a->tokens++;
+}
+
+/* Set by the resumption test.  */
+static gq_ticket_keys *g_ring;
+static const gq_tls_session *g_resume;
+
+static void
+ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
+{
+  struct app *a = u;
+
+  if (a->have_sess)
+    return;
+  CHECK_EQ (gq_tls_session_store (&a->sess, t), GQ_OK);
+  a->have_sess = 1;
+  a->sess_version = version;
 }
 
 static void
@@ -472,6 +491,7 @@ fill_events (gq_conn_events *e, struct app *a)
   e->cid_issued = ev_cid;
   e->cid_retired = ev_cid_retired;
   e->new_token = ev_new_token;
+  e->ticket = ev_ticket;
 }
 
 static struct pair *
@@ -499,6 +519,8 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   p->scfg.credentials.key = fx_ec.key;
   p->scfg.alpn = alpn_list;
   p->scfg.n_alpn = 1;
+  p->scfg.ticket_keys = g_ring;
+  p->ccfg.resume = g_resume;
   fill_events (&p->cev, &p->cli);
   fill_events (&p->sev, &p->srv);
   CHECK_EQ (gq_conn_client_new (&p->cli.c, ccfg, &p->ccfg, &p->cev,
@@ -549,6 +571,8 @@ pair_new_admit (const gq_conn_config *ccfg, unsigned loss, uint32_t seed,
   p->scfg.credentials.key = fx_ec.key;
   p->scfg.alpn = alpn_list;
   p->scfg.n_alpn = 1;
+  p->scfg.ticket_keys = g_ring;
+  p->ccfg.resume = g_resume;
   fill_events (&p->cev, &p->cli);
   fill_events (&p->sev, &p->srv);
   CHECK_EQ (gq_token_keys_init (&p->keys), GQ_OK);
@@ -598,7 +622,7 @@ test_handshake (uint32_t version, unsigned loss, uint32_t seed)
   CHECK_EQ (p->cli.info.alpn_len, 2);
   CHECK (gq_conn_is_established (p->cli.c));
   CHECK (gq_conn_is_established (p->srv.c));
-  CHECK_EQ (gq_conn_version (p->cli.c), version ? version : GQ_VERSION_1);
+  CHECK_EQ (gq_conn_version (p->cli.c), version ? version : GQ_VERSION_2);
   /* Let the handshake finish being confirmed and CIDs be exchanged.  */
   run (&p->net, NULL, 2000000);
   CHECK (p->cli.cids >= 2 && p->srv.cids >= 2);
@@ -944,8 +968,9 @@ test_retry_tamper (void)
   pair_free (p);
 }
 
-/* Compatible version negotiation (RFC 9368): the versions both ends end
-   up with, whatever the client started with.  */
+/* Compatible version negotiation (RFC 9368): the version both ends end up
+   with.  CV is the client's first flight, CLIST its preference order, SLIST
+   the server's versions; the server follows the client's order.  */
 static void
 compat_run (uint32_t cv, const uint32_t *clist, size_t nc,
             const uint32_t *slist, size_t ns, unsigned loss, uint32_t seed,
@@ -961,7 +986,6 @@ compat_run (uint32_t cv, const uint32_t *clist, size_t nc,
   cc.n_versions = nc;
   memcpy (sc.versions, slist, ns * sizeof *slist);
   sc.n_versions = ns;
-  sc.version = slist[0];
   p = pair_new (&cc, &sc, loss, seed);
   exchange (p);
   CHECK_EQ (gq_conn_version (p->cli.c), expect);
@@ -977,19 +1001,35 @@ test_compat (void)
   static const uint32_t v1[1] = { GQ_VERSION_1 };
   static const uint32_t v2[1] = { GQ_VERSION_2 };
 
-  /* The server prefers v2: a v1 client is moved up.  */
-  compat_run (GQ_VERSION_1, v12, 2, v21, 2, 0, 60, GQ_VERSION_2);
-  /* ...or down.  */
-  compat_run (GQ_VERSION_2, v21, 2, v12, 2, 0, 61, GQ_VERSION_1);
-  /* Same preference: nothing changes.  */
-  compat_run (GQ_VERSION_1, v12, 2, v12, 2, 0, 62, GQ_VERSION_1);
-  compat_run (GQ_VERSION_2, v21, 2, v21, 2, 0, 63, GQ_VERSION_2);
+  /* The client starts in v1 but prefers v2: it is moved up, whatever the
+     server's own order.  */
+  compat_run (GQ_VERSION_1, v21, 2, v12, 2, 0, 60, GQ_VERSION_2);
+  compat_run (GQ_VERSION_1, v21, 2, v21, 2, 0, 61, GQ_VERSION_2);
+  /* ...and one that prefers v1 stays there even if the server likes v2.  */
+  compat_run (GQ_VERSION_1, v12, 2, v21, 2, 0, 62, GQ_VERSION_1);
+  compat_run (GQ_VERSION_2, v12, 2, v21, 2, 0, 63, GQ_VERSION_1);
+  compat_run (GQ_VERSION_2, v21, 2, v12, 2, 0, 64, GQ_VERSION_2);
   /* A server that speaks only one keeps it.  */
-  compat_run (GQ_VERSION_1, v12, 2, v1, 1, 0, 64, GQ_VERSION_1);
-  compat_run (GQ_VERSION_2, v21, 2, v2, 1, 0, 65, GQ_VERSION_2);
+  compat_run (GQ_VERSION_1, v21, 2, v1, 1, 0, 65, GQ_VERSION_1);
+  compat_run (GQ_VERSION_2, v12, 2, v2, 1, 0, 66, GQ_VERSION_2);
+  /* A pinned client gets what it asked for.  */
+  compat_run (GQ_VERSION_1, v1, 1, v21, 2, 0, 67, GQ_VERSION_1);
+  compat_run (GQ_VERSION_2, v2, 1, v21, 2, 0, 68, GQ_VERSION_2);
   /* Under loss the switch still completes.  */
-  compat_run (GQ_VERSION_1, v12, 2, v21, 2, 20, 66, GQ_VERSION_2);
-  compat_run (GQ_VERSION_2, v21, 2, v12, 2, 20, 67, GQ_VERSION_1);
+  compat_run (GQ_VERSION_1, v21, 2, v12, 2, 20, 69, GQ_VERSION_2);
+  compat_run (GQ_VERSION_2, v12, 2, v21, 2, 20, 70, GQ_VERSION_1);
+  /* With nothing configured a client starts in v1 and both end in v2.  */
+  {
+    gq_conn_config none;
+    struct pair *p;
+
+    memset (&none, 0, sizeof none);
+    p = pair_new (&none, &none, 0, 71);
+    exchange (p);
+    CHECK_EQ (gq_conn_version (p->cli.c), GQ_VERSION_2);
+    CHECK_EQ (gq_conn_version (p->srv.c), GQ_VERSION_2);
+    pair_free (p);
+  }
 }
 
 /* An incompatible mismatch: Version Negotiation and a restart.  */
@@ -1033,7 +1073,8 @@ test_version_negotiation (void)
 }
 
 /* A forged Version Negotiation packet cannot downgrade the connection: the
-   server's version_information gives it away (RFC 9368 section 5).  */
+   restarted handshake lets the server move it back to the version the
+   client prefers (RFC 9368 sections 2 and 4).  */
 static void
 test_downgrade (void)
 {
@@ -1077,10 +1118,72 @@ test_downgrade (void)
                          only1, 1, 0, vn, sizeof vn, &vl), GQ_OK);
   gq_conn_recv (p->cli.c, p->net.now, vn, vl);
   CHECK_EQ (gq_conn_version (p->cli.c), GQ_VERSION_1);
+  /* The server, seeing a client that started in v1 and prefers v2, moves
+     the connection to v2 by compatible negotiation: the forgery achieves
+     nothing.  */
   run (&p->net, NULL, 3000000);
-  CHECK_EQ (p->cli.closed, 1);
-  CHECK (p->cli.ci.error == GQ_QERR_VERSION_NEGOTIATION);
+  CHECK (p->cli.connected && p->srv.connected);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  CHECK_EQ (gq_conn_version (p->cli.c), GQ_VERSION_2);
+  CHECK_EQ (gq_conn_version (p->srv.c), GQ_VERSION_2);
   pair_free (p);
+}
+
+/* Tickets are bound to the QUIC version (RFC 9369 section 5): a session
+   resumes on a connection of the version that issued it, and on no other.  */
+static void
+resume_case (uint32_t first, uint32_t second, int expect_resumed)
+{
+  gq_conn_config c1, c2;
+  struct pair *p;
+  gq_tls_session sess;
+  uint32_t ver;
+  static const uint32_t v21[2] = { GQ_VERSION_2, GQ_VERSION_1 };
+
+  memset (&c1, 0, sizeof c1);
+  c1.version = first;
+  p = pair_new (&c1, &c1, 0, 90);
+  exchange (p);
+  run (&p->net, NULL, 1000000);
+  CHECK (p->cli.have_sess);
+  CHECK_EQ (p->cli.sess_version, first);
+  CHECK (!p->cli.info.resumed);
+  sess = p->cli.sess;
+  ver = p->cli.sess_version;
+  pair_free (p);
+
+  memset (&c2, 0, sizeof c2);
+  if (second)
+    c2.version = second;
+  else
+    {
+      /* Starts in v1, prefers v2: the connection ends up in v2.  */
+      c2.version = GQ_VERSION_1;
+      memcpy (c2.versions, v21, sizeof v21);
+      c2.n_versions = 2;
+    }
+  g_resume = &sess;
+  p = pair_new (&c2, &c2, 0, 91);
+  g_resume = NULL;
+  exchange (p);
+  CHECK_EQ (p->cli.info.resumed, expect_resumed);
+  CHECK_EQ (p->srv.info.resumed, expect_resumed);
+  (void) ver;
+  pair_free (p);
+}
+
+static void
+test_resumption (void)
+{
+  CHECK_EQ (gq_ticket_keys_new (&g_ring), GQ_OK);
+  resume_case (GQ_VERSION_1, GQ_VERSION_1, 1);
+  resume_case (GQ_VERSION_2, GQ_VERSION_2, 1);
+  resume_case (GQ_VERSION_1, GQ_VERSION_2, 0);
+  resume_case (GQ_VERSION_2, GQ_VERSION_1, 0);
+  /* Offered in v1, but the server moves the connection to v2.  */
+  resume_case (GQ_VERSION_1, 0, 0);
+  gq_ticket_keys_free (g_ring);
+  g_ring = NULL;
 }
 
 static void
@@ -1182,7 +1285,7 @@ test_streams_misc (void)
 }
 
 static void
-test_key_update (void)
+test_key_update (uint32_t version)
 {
   struct pair *p;
   gq_conn_config cfg;
@@ -1191,6 +1294,7 @@ test_key_update (void)
   int round;
 
   memset (&cfg, 0, sizeof cfg);
+  cfg.version = version;
   p = pair_new (&cfg, &cfg, 0, 8);
   p->srv.respond = 20000;
   CHECK (run (&p->net, both_connected, 30000000));
@@ -1256,7 +1360,8 @@ main (void)
 {
   gq_crypto_init ();
   fx_setup ();
-  test_handshake (0, 0, 1);
+  test_handshake (0, 0, 1);		/* Both speak v2 by default.  */
+  test_handshake (GQ_VERSION_1, 0, 4);
   test_handshake (GQ_VERSION_2, 0, 2);
   test_handshake (0, 20, 3);
   test_requests (0, 11, 1, 20, 100, NULL, NULL, 0);
@@ -1283,12 +1388,26 @@ main (void)
   test_retry_tamper ();
   test_admit_input ();
   test_compat ();
+  test_resumption ();
   test_version_negotiation ();
   test_downgrade ();
   test_close ();
   test_idle ();
   test_streams_misc ();
-  test_key_update ();
+  test_key_update (0);
+  test_key_update (GQ_VERSION_2);
+  {
+    /* Everything again on version 2, with loss and tight flow control.  */
+    gq_conn_config v2;
+
+    memset (&v2, 0, sizeof v2);
+    v2.version = GQ_VERSION_2;
+    v2.initial_max_data = 20000;
+    v2.initial_max_stream_data = 6000;
+    v2.send_buffer = 4000;
+    test_requests (10, 80, 12, 30, 90000, &v2, &v2, 1);
+    test_requests (0, 81, 4, 50, 300000, &v2, &v2, 0);
+  }
   test_garbage ();
   TST_DONE ();
 }

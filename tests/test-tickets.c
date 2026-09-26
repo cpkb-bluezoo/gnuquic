@@ -184,6 +184,47 @@ test_malformed_payload (void)
   gq_ticket_keys_free (k);
 }
 
+/* Derived rings (RFC 9369 section 5): a ticket sealed under one label opens
+   only under that label, and rotation of the parent is followed by
+   deriving again.  */
+static void
+test_derived (void)
+{
+  gq_ticket_keys *parent, *v2, *v2b, *other, *v2n;
+  gq_session_state in, out;
+  uint8_t t[GQ_TICKET_MAX], tp[GQ_TICKET_MAX];
+  size_t n, np;
+  int active = 0;
+
+  CHECK_EQ (gq_ticket_keys_new (&parent), GQ_OK);
+  CHECK_EQ (gq_ticket_keys_derive (parent, "quic version 2", &v2), GQ_OK);
+  CHECK_EQ (gq_ticket_keys_derive (parent, "quic version 2", &v2b), GQ_OK);
+  CHECK_EQ (gq_ticket_keys_derive (parent, "something else", &other), GQ_OK);
+  fill_state (&in);
+  CHECK_EQ (gq_ticket_seal (v2, &in, t, sizeof t, &n), GQ_OK);
+  CHECK_EQ (gq_ticket_seal (parent, &in, tp, sizeof tp, &np), GQ_OK);
+  /* Deterministic: two derivations of the same parent agree.  */
+  CHECK_EQ (gq_ticket_open (v2b, t, n, &out, &active), GQ_OK);
+  CHECK_EQ (active, 1);
+  CHECK (out.cipher_suite == in.cipher_suite && out.psk_len == in.psk_len);
+  /* But the parent and other labels do not open each other's tickets.  */
+  CHECK_EQ (gq_ticket_open (parent, t, n, &out, NULL), GQ_ERR_CRYPTO);
+  CHECK_EQ (gq_ticket_open (other, t, n, &out, NULL), GQ_ERR_CRYPTO);
+  CHECK_EQ (gq_ticket_open (v2, tp, np, &out, NULL), GQ_ERR_CRYPTO);
+  /* After the parent rotates, a fresh derivation still opens old tickets,
+     and the active key moves on.  */
+  CHECK_EQ (gq_ticket_keys_rotate (parent), GQ_OK);
+  CHECK_EQ (gq_ticket_keys_derive (parent, "quic version 2", &v2n), GQ_OK);
+  CHECK_EQ (gq_ticket_open (v2n, t, n, &out, &active), GQ_OK);
+  CHECK_EQ (active, 0);
+  CHECK_EQ (gq_ticket_keys_derive (NULL, "x", &v2), GQ_ERR_INVAL);
+  gq_ticket_keys_free (parent);
+  gq_ticket_keys_free (v2);
+  gq_ticket_keys_free (v2b);
+  gq_ticket_keys_free (other);
+  gq_ticket_keys_free (v2n);
+}
+
 int
 main (void)
 {
@@ -192,5 +233,6 @@ main (void)
   test_rotation ();
   test_shared_keys ();
   test_malformed_payload ();
+  test_derived ();
   TST_DONE ();
 }

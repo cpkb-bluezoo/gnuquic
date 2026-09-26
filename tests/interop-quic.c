@@ -271,10 +271,11 @@ ev_closed (void *u, const gq_conn_close_info *i)
 }
 
 static void
-ev_ticket (void *u, const gq_tls_ticket *t)
+ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
 {
   (void) u;
   (void) t;
+  (void) version;
 }
 
 /* ---- I/O ---- */
@@ -495,8 +496,6 @@ main (int argc, char **argv)
   signal (SIGPIPE, SIG_IGN);
   gq_token_keys_init (&a.keys);
   a.cfg.version = a.v2 ? GQ_VERSION_2 : 0;
-  if (a.cfg.n_versions && a.cfg.version == 0)
-    a.cfg.version = a.cfg.versions[0];
   a.ev.user = &a;
   a.ev.connected = ev_connected;
   a.ev.stream_data = ev_data;

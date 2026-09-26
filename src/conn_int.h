@@ -146,7 +146,9 @@ struct gq_conn
 
   gq_tls *tls;
   gq_tls_config ctls;		/* Copies of the caller's configuration:  */
-  gq_tls_server_config stls;	/* the engine keeps pointers into them.  */
+  gq_tls_server_config stls;
+  gq_ticket_keys *ticket_base;	/* Server: the caller's ring (v1 tickets).  */
+  gq_ticket_keys *ticket_v2;	/* ...and the ring derived for v2.  */	/* the engine keeps pointers into them.  */
   uint8_t tp_buf[256];
   size_t tp_len;
   gq_transport_params peer_tp;
