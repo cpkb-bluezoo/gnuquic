@@ -42,6 +42,7 @@
 #include <gnuquic/policy.h>
 #include <gnuquic/tlsconn.h>
 #include <gnuquic/tls12conn.h>
+#include <gnuquic/tlsauto.h>
 
 #include "interop-util.h"
 
@@ -61,16 +62,13 @@ struct state
   size_t echoed, max_bytes;
   int resumed;
   int key_update_after, chunks;
-  gq_tlsconn *conn;
-  gq_tls12conn *conn12;
-  int tls12;
+  gq_tlsauto *conn;
+  int tls12, tls13;
   int done;
 };
 
-#define S_SEND(s, d, n) ((s)->tls12 ? gq_tls12conn_send ((s)->conn12, d, n) \
-                                    : gq_tlsconn_send ((s)->conn, d, n))
-#define S_CLOSE(s) ((s)->tls12 ? gq_tls12conn_close ((s)->conn12) \
-                               : gq_tlsconn_close ((s)->conn))
+#define S_SEND(s, d, n) gq_tlsauto_send ((s)->conn, d, n)
+#define S_CLOSE(s) gq_tlsauto_close ((s)->conn)
 
 static int
 xwrite (void *u, const uint8_t *d, size_t n)
@@ -102,8 +100,8 @@ xdata (void *u, const uint8_t *d, size_t n)
   if (S_SEND (s, d, n) != GQ_OK)
     return 1;
   s->echoed += n;
-  if (s->key_update_after && !s->tls12 && s->chunks == s->key_update_after)
-    gq_tlsconn_key_update (s->conn, 1);
+  if (s->key_update_after && s->chunks == s->key_update_after)
+    gq_tlsauto_key_update (s->conn, 1);
   if (s->max_bytes && s->echoed >= s->max_bytes)
     {
       S_CLOSE (s);
@@ -290,6 +288,7 @@ main (int argc, char **argv)
       else if (OPT ("--connections")) connections = atoi (v);
       else if (!strcmp (a, "--no-tickets")) tickets = 0;
       else if (!strcmp (a, "--tls12")) st.tls12 = 1;
+      else if (!strcmp (a, "--tls13")) st.tls13 = 1;
       else
         {
           fprintf (stderr, "unknown option %s\n", a);
@@ -381,8 +380,9 @@ main (int argc, char **argv)
       ev.connected = xconnected;
       ev.closed = xclosed;
       ev.rekey_records = rekey;
-      if ((st.tls12 ? gq_tls12conn_server_new (&st.conn12, &cfg, &ev)
-                    : gq_tlsconn_server_new (&st.conn, &cfg, &ev)) != GQ_OK)
+      if (gq_tlsauto_server_new (&st.conn, &cfg, &ev,
+                                 st.tls12 ? GQ_TLSAUTO_TLS12
+                                 : st.tls13 ? GQ_TLSAUTO_TLS13 : 0) != GQ_OK)
         {
           printf ("result=fail reason=new\n");
           return 1;
@@ -401,9 +401,9 @@ main (int argc, char **argv)
               st.close_error = st.connected ? 0 : GQ_ERR_PROTOCOL;
               break;
             }
-          r = st.tls12 ? gq_tls12conn_receive (st.conn12, buf, (size_t) n)
-                       : gq_tlsconn_receive (st.conn, buf, (size_t) n);
+          r = gq_tlsauto_receive (st.conn, buf, (size_t) n);
         }
+      printf ("version=%x\n", gq_tlsauto_version (st.conn));
       printf ("echoed=%zu\n", st.echoed);
       if (!(r == GQ_OK && st.close_error == 0 && (st.connected || st.done)))
         {
@@ -412,10 +412,7 @@ main (int argc, char **argv)
           all_ok = 0;
         }
       fflush (stdout);
-      if (st.tls12)
-        gq_tls12conn_free (st.conn12);
-      else
-        gq_tlsconn_free (st.conn);
+      gq_tlsauto_free (st.conn);
       close (st.fd);
     }
   if (all_ok)

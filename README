@@ -64,6 +64,10 @@ Pre-alpha.  What exists today:
            whole-flight retransmission
   dtls12cookie  stateless HelloVerifyRequest for servers; interoperating
            with OpenSSL, GnuTLS and wolfSSL
+  tlsauto  version negotiation over TCP: one listener serves TLS 1.3 and 1.2
+           (preferring 1.3), clients offer both; downgrade sentinel; either
+           end can be pinned to one version
+  dtlsauto the same for DTLS, including the stateless listener
 
   ranges   sets of half-open ranges (received packet numbers, stream
            gaps, acknowledged and lost data)
@@ -88,7 +92,7 @@ Pre-alpha.  What exists today:
            (RFC 9002 section 7); interoperating with quiche
 
 Not yet written: pacing and ECN, the server's
-preferred_address, and the HTTP/3 and DoQ examples.  See the manual
+preferred_address, QUIC-LB connection IDs, and the HTTP/3 and DoQ examples.  See the manual
 (doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building

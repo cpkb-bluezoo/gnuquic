@@ -257,6 +257,19 @@ gq_tls12conn_start (gq_tls12conn *c)
   return r;
 }
 
+int
+gq_tls12conn_client_adopt (gq_tls12conn *c, const uint8_t *hello, size_t len)
+{
+  int r;
+
+  if (c == NULL || c->closed || c->server)
+    return GQ_ERR_INVAL;
+  r = gq_tls12_client_adopt (c->tls, hello, len);
+  if (r != GQ_OK)
+    finish (c, r, gq_tls12_alert (c->tls));
+  return r;
+}
+
 /* ------------------------------------------------------------------ */
 /* Input                                                              */
 /* ------------------------------------------------------------------ */

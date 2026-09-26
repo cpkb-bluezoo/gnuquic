@@ -750,6 +750,31 @@ gq_dtls12_start (gq_dtls12 *c, uint64_t now)
 }
 
 int
+gq_dtls12_client_adopt (gq_dtls12 *c, const uint8_t *hello, size_t len,
+                        uint64_t next_seq, uint64_t now)
+{
+  int r;
+
+  if (c == NULL || c->server || c->closed || c->in_receive)
+    return GQ_ERR_INVAL;
+  c->now = now;
+  r = gq_tls12_client_adopt (c->tls, hello, len);
+  if (r == GQ_OK)
+    r = fl_add_msg (c, hello, len);
+  if (r != GQ_OK)
+    {
+      fail (c, r, gq_tls12_alert (c->tls));
+      return r;
+    }
+  /* It is on the wire already: note when, and time its retransmission.  */
+  c->wr0.send_seq = next_seq;
+  c->fl.sent_items = c->fl.n_item;
+  c->fl.last_tx = now;
+  c->fl.deadline = now + c->fl.rto;
+  return GQ_OK;
+}
+
+int
 gq_dtls12_receive (gq_dtls12 *c, const uint8_t *dgram, size_t len,
                    uint64_t now)
 {

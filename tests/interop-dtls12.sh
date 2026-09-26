@@ -45,6 +45,7 @@ trap cleanup EXIT INT TERM
 
 fails=0
 runs=0
+VF=--dtls12		# Ours pinned to 1.2; empty negotiates.
 
 cd "$T" || exit 77
 gen_ok=1
@@ -106,7 +107,7 @@ start_server ()
   while [ $attempt -lt 5 ]; do
     port=$(free_port)
     case $kind in
-      ours) "$OURS" server "$port" --dtls12 "$@" >server.log 2>&1 & ;;
+      ours) "$OURS" server "$port" $VF "$@" >server.log 2>&1 & ;;
       wolf) "$WOLF" server "$port" --dtls12 "$@" >server.log 2>&1 & ;;
       # s_server sends what it reads on stdin once the client is connected;
       # a FIFO keeps it an ordinary background process.
@@ -164,7 +165,7 @@ ours_client ()
     fails=$((fails + 1)); return
   fi
   # shellcheck disable=SC2086
-  "$OURS" client 127.0.0.1 "$port" --dtls12 --ca ca.pem --sni example.test $cargs \
+  "$OURS" client 127.0.0.1 "$port" $VF --ca ca.pem --sni example.test $cargs \
     >client.out 2>client.err
   rc=$?
   n=0
@@ -324,6 +325,40 @@ ours_client "dtls12/gnutls-server: small MTU, several messages" gnutls \
 ours_client "dtls12/gnutls-server: 20% loss" gnutls \
   "--x509certfile=ec.pem --x509keyfile=ec.key --priority=$P12" \
   "--loss 20 --seed 4 --messages 5" ok "result=ok"
+
+# ---- version negotiation (dtlsauto.h): ours offers DTLS 1.3 and 1.2, the
+# peer only speaks 1.2, so the association falls back ----
+VF=
+ours_client "dtlsauto/openssl-server: falls back to 1.2" openssl \
+  "-cert ec.pem -key ec.key" "--rev" ok "version=fefd" "result=ok"
+ours_client "dtlsauto/openssl-server: falls back, cookie exchange" openssl \
+  "-cert ec.pem -key ec.key -listen" "--rev" ok "version=fefd" "result=ok"
+ours_client "dtlsauto/openssl-server: falls back, small MTU" openssl \
+  "-cert ec.pem -key ec.key" "--rev --mtu 400" ok "version=fefd" "result=ok"
+ours_client "dtlsauto/gnutls-server: falls back to 1.2" gnutls \
+  "--x509certfile=ec.pem --x509keyfile=ec.key --priority=$P12" "" ok \
+  "version=fefd" "echoed=3"
+ours_client "dtlsauto/gnutls-server: falls back, 20% loss" gnutls \
+  "--x509certfile=ec.pem --x509keyfile=ec.key --priority=$P12" \
+  "--loss 20 --seed 4 --messages 5" ok "version=fefd" "result=ok"
+ours_client "dtlsauto/wolf-server: 1.2 only, falls back" wolf \
+  "--cert ec.pem --key ec.key" "" ok "version=fefd" "result=ok"
+ours_server "dtlsauto/openssl-client: one port serves 1.2" openssl "" "" ok \
+  "version=fefd" "echoed=1"
+ours_server "dtlsauto/openssl-client: one port, cookie exchange" openssl \
+  "--cookie" "" ok "cookie-verified" "version=fefd"
+ours_server "dtlsauto/gnutls-client: one port serves 1.2" gnutls "" \
+  "--priority=$P12" ok "version=fefd" "echoed=1"
+ours_server "dtlsauto/gnutls-client: one port, cookie exchange" gnutls \
+  "--cookie" "--priority=$P12" ok "cookie-verified" "version=fefd"
+# A port pinned to DTLS 1.3 refuses a 1.2 client, and a client pinned to
+# 1.3 gets nowhere with a 1.2 server.
+VF=--dtls13
+ours_server "dtlsauto/openssl-client: port pinned to 1.3 refuses 1.2" openssl \
+  "" "" fail "result=fail"
+ours_client "dtlsauto/openssl-server: client pinned to 1.3 refuses 1.2" openssl \
+  "-cert ec.pem -key ec.key" "--rev --timeout 4" fail "result=fail"
+VF=--dtls12
 
 echo "$runs scenarios, $fails failed"
 if [ $runs -eq 0 ]; then exit 77; fi

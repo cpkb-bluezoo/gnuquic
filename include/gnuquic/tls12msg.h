@@ -84,11 +84,17 @@ typedef struct gq_tls12_ske
 {
   gq_slice params;
   gq_slice point;
+  uint16_t group;		/* The named curve.  */
   uint16_t scheme;		/* SignatureAndHashAlgorithm.  */
   gq_slice signature;
 } gq_tls12_ske;
 
 int gq_tls12_ske_parse (gq_slice body, gq_tls12_ske *ske);
+
+/* As gq_tls12_ske_parse, but also accepts secp384r1 and x25519: for a client
+   whose hello offered TLS 1.3 as well (gq_tlsauto), whose supported_groups
+   were the shared list and so let a TLS 1.2 server choose among them.  */
+int gq_tls12_ske_parse_wide (gq_slice body, gq_tls12_ske *ske);
 
 /* CertificateRequest.  SIGALGS is the raw list of uint16 schemes.  A
    request that names no certificate type we can satisfy is not rejected

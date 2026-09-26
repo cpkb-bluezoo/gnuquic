@@ -66,9 +66,16 @@ Documentation License''.
 @chapter Introduction
 
 GNU QUIC is an engine for QUIC (RFC 9000) and the TLS 1.3 handshake it
-depends on, with TLS and DTLS for other transports planned.  It is
-released under the GNU Lesser General Public License, version 3 or any
-later version.
+depends on, and also for TLS 1.2 and 1.3 over TCP and DTLS 1.2 and 1.3
+over UDP.  It is released under the GNU Lesser General Public License,
+version 3 or any later version.
+
+For QUIC it provides versions 1 and 2 with compatible version negotiation,
+streams and flow control, loss recovery with NewReno congestion control,
+address validation (Retry and tokens), 0-RTT, path validation and
+migration, DATAGRAM frames, and an endpoint layer that serves many
+connections from one socket.  Pacing, ECN and the server's
+preferred_address are not implemented.
 
 The library is the C member of a family: Gumdrop (Java) and Hopf (Rust)
 established the architecture, and this project ports it to C under the
@@ -94,6 +101,7 @@ system is expected to keep it that way.
 * Key exchange and signatures::  The @file{kx.h} and @file{sign.h} facades.
 * The push-parser contract::  How every parser and engine takes input.
 * Source layout::         Where things are.
+* Testing::               Unit, simulated and interop tests.
 @end menu
 
 @node Layers
@@ -103,7 +111,8 @@ system is expected to keep it that way.
 @example
    HTTP/3, DoQ, ...                (applications, not in this tree)
    ---------------------------------------------------------------
-   quic        connection, streams, flow control, recovery
+   endpoint    many connections behind one socket: routing, admission
+   quic        connection, streams, flow control, recovery, migration
    tls / dtls  handshake engines and record layers (1.3 and 1.2)
    codec       varint, frame, packet, transport parameters, handshake msgs
    ---------------------------------------------------------------
@@ -237,12 +246,19 @@ I/O.
 
 @table @file
 @item include/gnuquic/
-Public headers (installed).
+Public headers (installed).  By layer: @file{varint.h}, @file{frame.h},
+@file{packet.h}, @file{protect.h}, @file{tparams.h} (QUIC codecs);
+@file{ranges.h}, @file{stream.h}, @file{conn.h}, @file{token.h},
+@file{listen.h}, @file{endpoint.h} (QUIC state); @file{tls.h},
+@file{tlsconn.h}, @file{tls12.h}, @file{tls12conn.h}, @file{dtls.h},
+@file{dtls12.h} and their record and cookie modules (handshake engines and
+transports); @file{crypto.h}, @file{kx.h}, @file{sign.h}, @file{trust.h},
+@file{tickets.h}, @file{replay.h}, @file{policy.h} (facades and policy).
 @item src/
 The library, @file{libgnuquic}.
 @item tests/
 One program per module, run by @command{make check}, and the interop
-programs.
+programs (@ref{Testing}).
 @item doc/
 This manual.
 @item po/
@@ -251,6 +267,24 @@ Message catalogues.
 
 Symbols carry the @code{gq_} or @code{GQ_} prefix, and the exported list
 is restricted by @code{-export-symbols-regex '^gq_'}.
+
+@node Testing
+@section Testing
+
+@command{make check} runs a unit test per module (RFC vectors where they
+exist), loopback tests that pair engines and connections over a
+simulated network with a virtual clock (loss, reordering, duplication,
+corruption, NAT rebinding), and interoperability scripts against
+independent implementations: @file{tests/interop.sh} (TLS against OpenSSL
+and GnuTLS), @file{tests/interop-dtls.sh} and @file{tests/interop-dtls12.sh}
+(DTLS against wolfSSL, OpenSSL and GnuTLS) and @file{tests/interop-quic.sh}
+(QUIC against quiche: handshakes, loss, Retry, Version Negotiation, key
+update, migration, DATAGRAM, 0-RTT and concurrent clients, both
+directions).  Scripts skip themselves (exit 77) when their peers are
+missing; set @env{GQ_NO_INTEROP} to skip them, @env{GQ_INTEROP_FILTER} to
+run scenarios whose names contain a string, and @env{QUICHE_DIR} to name
+the directory holding @command{quiche-client} and @command{quiche-server}.
+The library is also run under AddressSanitizer and UndefinedBehaviorSanitizer.
 
 @node Security policy
 @chapter Security policy
@@ -268,6 +302,7 @@ that everything excluded here is rejected.
 * TLS 1.2 hardening::
 * DTLS 1.3::
 * DTLS 1.2::
+* QUIC policy::
 * Key exchange::
 * Signatures and certificates::
 * Server behaviour::
@@ -279,16 +314,49 @@ that everything excluded here is rejected.
 
 @multitable @columnfractions .2 .8
 @headitem Transport @tab Versions
-@item QUIC @tab TLS 1.3 only (required by RFC 9001)
+@item QUIC @tab QUIC v1 and v2 (@file{conn.h}), with TLS 1.3 only (required by RFC 9001)
 @item TCP  @tab TLS 1.3 (@file{tlsconn.h}) or TLS 1.2 (@file{tls12conn.h})
 @item UDP  @tab DTLS 1.3 (@file{dtls.h}) or DTLS 1.2 (@file{dtls12.h})
 @end multitable
 
-SSL 3.0, TLS 1.0, TLS 1.1 and DTLS 1.0 are not implemented.  A TLS
-endpoint is configured for one protocol generation, and the engine does
-not fall back from 1.3 to 1.2 by itself.  Running both means two
-listeners, which removes cross-version downgrade ambiguity at the
-deployment boundary, as in Gumdrop.
+SSL 3.0, TLS 1.0, TLS 1.1 and DTLS 1.0 are not implemented.
+
+@cindex version negotiation, TLS and DTLS
+@cindex downgrade sentinel
+Over TCP and UDP the version is negotiated by default
+(@file{tlsauto.h}, @file{dtlsauto.h}).  The two engines stay separate
+state machines; a thin front decides which one runs.  A server looks at the
+ClientHello: if it offers @code{supported_versions} with (D)TLS 1.3 the 1.3
+engine serves it, otherwise the 1.2 engine does, so one listener (one port)
+serves both kinds of peer and prefers 1.3.  A client sends one ClientHello
+that offers both, and continues with whichever the server picked, handing
+the transcript to the 1.2 engine if the ServerHello (or, in DTLS, the
+HelloVerifyRequest) is a 1.2 one.  The decision is made once, from the
+first messages, and is never revisited: neither protocol has
+renegotiation into another version, so an association that was 1.2 stays
+1.2 and there is nothing to re-run.  A TLS 1.2 server that also serves 1.3
+sets the RFC 8446 section 4.1.3 downgrade sentinel in its ServerHello
+random, and a negotiating client that offered 1.3 aborts
+(@code{illegal_parameter}) when it sees it, so an attacker cannot strip
+1.3 from the offer.  Both ends can instead be pinned to one version
+(@code{GQ_TLSAUTO_TLS12}, @code{GQ_TLSAUTO_TLS13} and the
+@code{GQ_DTLSAUTO_} counterparts), which is what a deployment with a port
+per version, or a test, wants; a pinned endpoint refuses the other version
+(@code{protocol_version}) and does not set or check the sentinel.  QUIC is
+never negotiated: RFC 9001 requires TLS 1.3, so the QUIC engine refuses
+anything else and a combined hello is not offered with QUIC.
+
+Two consequences of the combined hello are worth knowing.  The
+@code{supported_groups} list is shared by both versions, so a 1.2 server
+may choose X25519 or secp384r1 for its ECDHE key; the 1.2 client engine
+accepts those two curves for the key exchange only when its ClientHello
+also offered 1.3 (a standalone 1.2 client stays on secp256r1, as
+@ref{TLS 1.2 hardening} says).  And over DTLS a stateless listener must
+decide from the first datagram: a ClientHello with a cookie in its
+@code{legacy_cookie} field answers a DTLS 1.2 HelloVerifyRequest, one with
+the @code{cookie} extension a DTLS 1.3 HelloRetryRequest, and a first
+ClientHello by its @code{supported_versions}.  Without a listener the
+first datagram must hold that extension.
 
 @node Cipher suites
 @section Cipher suites
@@ -320,7 +388,8 @@ deliberately narrower profile than TLS 1.3, the same as in Gumdrop's
 @code{Tls12HandshakeEngine} and Hopf's @code{tls12} engine.  The engine
 (@file{tls12.h}) is a separate state machine from the TLS 1.3 one, and the
 byte-stream wrapper (@file{tls12conn.h}) mirrors @file{tlsconn.h}.  An
-endpoint is one or the other, never both.
+association is one or the other; which one is negotiated at the start
+(@ref{Versions}) and never changes.
 
 @itemize @bullet
 @item
@@ -382,12 +451,12 @@ than exceeding the confidentiality limit.  ChaCha20-Poly1305 is limited
 only by the 64-bit sequence number.
 
 @item
-No 0-RTT, no KeyUpdate and no downgrade sentinel: because a listener is
-pinned to one version, the RFC 8446 section 4.1.3 sentinel, which exists
-for servers that choose between 1.2 and 1.3 within one handshake, has
-nothing to protect.  A TLS 1.2 server refuses a ClientHello that lists
+No 0-RTT and no KeyUpdate.  The RFC 8446 section 4.1.3 downgrade sentinel
+is set by a 1.2 server that also serves 1.3 and checked by a client that
+offered 1.3 (@ref{Versions}); a standalone 1.2 endpoint neither sets nor
+checks it.  A 1.2 server refuses a ClientHello that lists
 @code{supported_versions} without TLS 1.2 (@code{protocol_version}); a
-TLS 1.2 client refuses a ServerHello that carries the extension.
+standalone 1.2 client refuses a ServerHello that carries the extension.
 @end itemize
 
 @node DTLS 1.3
@@ -508,6 +577,24 @@ Verified in both directions against OpenSSL 3, GnuTLS 3.8 and wolfSSL
 (@file{tests/interop-dtls12.sh}), including cookies, fragmentation and
 packet loss, resumption and client certificates.
 
+@node QUIC policy
+@section QUIC
+
+QUIC endpoints speak versions 1 and 2 only.  A server accepts an Initial
+only in a datagram of at least 1200 bytes, and answers unvalidated clients
+at no more than three times what they sent (a client proves its address by
+a token or by completing the handshake); Retry is available always or
+under load, and Retry and NEW_TOKEN tokens are authenticated, bound to the
+client address and expire.  A forged Version Negotiation packet cannot
+downgrade a connection (@ref{Version negotiation}).  Session tickets are
+bound to the QUIC version, and early data is accepted at most once per
+ticket, only with an anti-replay hook, and never without the application
+being able to tell it is replayable (@ref{Early data}).  Unknown
+destination IDs draw a rate limited stateless reset that is smaller than
+its trigger.  Packet protection keys are updated before the AEAD limits,
+and a path's amplification limit applies to every unvalidated address
+(@ref{Path validation and migration}).
+
 @node Key exchange
 @section Key exchange
 
@@ -538,8 +625,15 @@ list, but never asks for a retry when the client already sent an
 acceptable key share.
 
 @item
-A ClientHello without @code{supported_versions} offering TLS 1.3 is
-refused with @code{protocol_version}.  Nothing older is served.
+The TLS 1.3 server engine (@file{tls.h}, @file{tlsconn.h}, and QUIC)
+refuses a ClientHello without @code{supported_versions} offering TLS 1.3,
+with @code{protocol_version}; it never falls back to an older protocol
+itself.  TLS 1.2 is served by its own engine (@file{tls12.h},
+@file{tls12conn.h}), and the negotiating front of @ref{Versions}
+(@file{tlsauto.h}, @file{dtlsauto.h}) lets one listener serve both by
+picking the engine from the ClientHello; QUIC always uses the 1.3 engine
+directly.  The 1.2 engine has the mirror-image rule, in @ref{TLS 1.2
+hardening}.
 
 @item
 A client certificate must be valid for TLS client authentication (the
@@ -940,8 +1034,9 @@ header codecs, packet number encoding, key derivation and key update,
 in-place packet protection, the Retry integrity tag, Version
 Negotiation, stateless reset and transport parameters.  Verified against
 the RFC 9001 appendix A and RFC 9369 appendix A vectors and fuzzed under
-ASan and UBSan.  Still to add: address validation tokens and RFC 9368
-version information.
+ASan and UBSan.  Address validation tokens and RFC 9368 version
+information came later (@ref{Address validation}, @ref{Version
+negotiation}).
 
 @item
 @strong{Done.}  The key exchange facade (X25519, P-256, P-384 and the
@@ -992,11 +1087,10 @@ age and fallback to a full handshake.  Verified against RFC 8448 section
 4 and against real peers.
 
 @item
-@strong{In progress.}  0-RTT early data with anti-replay.  The engines,
-the record layer skip budget, the TCP glue and the replay cache are
-written and the server side is verified against the RFC 8448 section 4
-early traffic secret.  Loopback tests, interop scenarios and
-sanitizer runs are still to do.
+@strong{Done.}  0-RTT early data with anti-replay: the engines, the
+record layer skip budget, the TCP glue and the replay cache
+(@ref{Early data}), verified against the RFC 8448 section 4 early
+traffic secret; the QUIC transport side is a step of its own below.
 @end enumerate
 
 @item
@@ -1062,14 +1156,47 @@ DTLS 1.3 fragment reassembly, whole-flight retransmission and a
 stateless HelloVerifyRequest listener (@ref{DTLS 1.2}).
 
 @item
+@strong{Done.}  Version negotiation for TLS and DTLS (@ref{Versions}):
+one listener serves 1.3 and 1.2 peers and prefers 1.3, a client offers
+both and falls back, the downgrade sentinel protects the choice, and
+either end can be pinned to one version.  Verified in simulation (every
+pairing, loss, front door on and off) and against OpenSSL, GnuTLS and
+wolfSSL.
+
+@item
 Examples: an HTTP/3 (QPACK) client and server and a DoQ (RFC 9250)
 client and server, in a separate repository or under @file{examples/}.
 @end enumerate
 
 Open decisions: whether to vendor gnulib (probably yes once portability
-shims are needed); whether the timer interface is a callback or a
-``next timeout'' query (a query fits C better); Encrypted Client Hello
-and certificate compression, which Gumdrop has and are deferred here.
+shims are needed); Encrypted Client Hello and certificate compression,
+which Gumdrop has and are deferred here.  (The timer interface was
+decided: a ``next timeout'' query, for connections and endpoints alike.)
+
+Not implemented anywhere yet: pacing and ECN, the server's
+preferred_address, multipath, and DTLS 1.3 connection IDs.
+
+@subheading Planned
+@itemize @bullet
+@item
+QUIC-LB (draft-ietf-quic-load-balancers): connection IDs that encode a
+server identifier (plaintext, stream cipher or block cipher algorithm) so
+that a load balancer routes packets, including after migration, without
+keeping state.  The endpoint would take a pluggable connection ID
+generator, keeping the random default; the server ID must also appear in
+Retry source connection IDs and NEW_CONNECTION_ID.  Needs a
+routing test in the simulated NAT.
+
+@item
+Gaps found by comparing with Gumdrop and Hopf: certificate compression
+(RFC 8879); @code{record_size_limit} (RFC 8449); Encrypted Client Hello
+(RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
+has them; QUIC keep-alive PING; a streams-available event when
+MAX_STREAMS raises the limit; DPLPMTUD; pacing, ECN and segmentation
+offload; the server's preferred_address; a key log hook; caching AEAD
+handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
+Whether to send Retry by default is also open.
+@end itemize
 
 @node Internationalization
 @chapter Internationalization

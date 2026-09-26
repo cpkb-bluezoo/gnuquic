@@ -74,6 +74,10 @@ struct gq_tls
   size_t sid_len;
   gq_kx_key kx[2];
   size_t n_kx;
+  uint16_t suites12[16];	/* also_tls12: what a 1.2 client would offer.  */
+  size_t n_suites12;
+  uint16_t sigs12[16];
+  size_t n_sigs12;
   const gq_tls_session *offered;	/* Session offered for resumption.  */
   int resumed;				/* A PSK was accepted.  */
   int hrr_seen;

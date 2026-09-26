@@ -379,6 +379,8 @@ s_on_client_hello (gq_tls12 *t, gq_slice msg, gq_slice body)
         return g12_fail (t, GQ_ALERT_HANDSHAKE_FAILURE, GQ_ERR_UNSUPPORTED);
     }
   TRY (g12_rnd (t, t->server_random, 32));
+  if (t->scfg.tls13_sentinel)
+    memcpy (t->server_random + 24, "DOWNGRD\x01", 8);	/* RFC 8446 4.1.3.  */
   if (g12_tb_add (t, msg.data, msg.len) != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
 

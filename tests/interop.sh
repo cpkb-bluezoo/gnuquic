@@ -337,6 +337,18 @@ if [ -n "$GNUTLS_SERV" ] && "$GNUTLS_SERV" --version >/dev/null 2>&1; then
   P12="NORMAL:-VERS-ALL:+VERS-TLS1.2"
   scenario "tls12/gnutls: default" gnutls "$GS --priority=$P12" \
     "--tls12 --expect $HTTP200" ok "result=ok" "resumed=0"
+  # A client that negotiates (the default): TLS 1.3 when the server has it,
+  # else TLS 1.2 within the same handshake.
+  scenario "auto/openssl: prefers TLS 1.3" openssl "$OS" "--expect $HTTP200" ok \
+    "version=304" "result=ok"
+  scenario "auto/openssl: falls back to TLS 1.2" openssl "$O12" "--expect $HTTP200" ok \
+    "version=303" "result=ok"
+  scenario "auto/openssl: falls back to TLS 1.2 (RSA certificate)" openssl "$R12" \
+    "--expect $HTTP200" ok "version=303" "result=ok"
+  scenario "auto/gnutls: falls back to TLS 1.2" gnutls "$GS --priority=$P12" \
+    "--expect $HTTP200" ok "version=303" "result=ok"
+  scenario "pinned TLS 1.3 client against a TLS 1.2 server fails" openssl "$O12" \
+    "--tls13 --expect $HTTP200" fail "result=fail"
   scenario "tls12/gnutls: RSA certificate" gnutls \
     "--x509certfile=rsa.pem --x509keyfile=rsa.key --http --priority=$P12" \
     "--tls12 --expect $HTTP200" ok "result=ok"
@@ -477,8 +489,14 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "$SC --client-auth required --ca ca.pem" "" fail "alert=116"
   server_scenario "server/openssl: client certificate from untrusted CA" openssl \
     "$SC --client-auth required --ca ca.pem" "-cert badcli.pem -key badcli.key" fail "alert=48"
-  server_scenario "server/openssl: TLS 1.2 client is refused" openssl \
-    "$SC" "-tls1_2" fail "alert=70"
+  server_scenario "server/openssl: TLS 1.2 client is refused by a TLS 1.3 only server" openssl \
+    "$SC --tls13" "-tls1_2" fail "alert=70"
+  server_scenario "server/openssl: TLS 1.2 client is served by a negotiating server" openssl \
+    "$SC" "-tls1_2" ok "version=303" "result=ok"
+  server_scenario "server/openssl: TLS 1.3 client is served by a negotiating server" openssl \
+    "$SC" "-tls1_3" ok "version=304" "result=ok"
+  server_scenario "server/openssl: TLS 1.3 client is refused by a TLS 1.2 only server" openssl \
+    "$SC --tls12" "-tls1_3" fail "alert=70"
   server_scenario "server/openssl: server-initiated rekey and KeyUpdate" openssl \
     "$SC --rekey 2 --key-update 1" "" ok "result=ok"
   server_scenario "server12/openssl: default" openssl "$S12" "-tls1_2" ok \
@@ -531,8 +549,12 @@ if [ -n "${GNUTLS_CLI:-}" ] && "$GNUTLS_CLI" --version >/dev/null 2>&1; then
   server_scenario "server/gnutls: client certificate" gnutls \
     "$SC --client-auth required --ca ca.pem" \
     "--priority=$P13 --x509certfile=cli.pem --x509keyfile=cli.key" ok "client_auth=1"
-  server_scenario "server/gnutls: TLS 1.2 client is refused" gnutls "$SC" \
-    "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.2" fail "alert=70"
+  server_scenario "server/gnutls: TLS 1.2 client is refused by a TLS 1.3 only server" gnutls \
+    "$SC --tls13" "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.2" fail "alert=70"
+  server_scenario "server/gnutls: TLS 1.2 client is served by a negotiating server" gnutls "$SC" \
+    "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.2" ok "version=303" "result=ok"
+  server_scenario "server/gnutls: TLS 1.3 client is served by a negotiating server" gnutls "$SC" \
+    "--priority=$P13" ok "version=304" "result=ok"
   P12="NORMAL:-VERS-ALL:+VERS-TLS1.2"
   server_scenario "server12/gnutls: default" gnutls "$S12" "--priority=$P12" ok "result=ok" "sni=example.test"
   server_scenario "server12/gnutls: ChaCha20-Poly1305" gnutls "$S12" \

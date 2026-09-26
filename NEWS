@@ -3,6 +3,17 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** Version negotiation for TLS and DTLS (tlsauto.h, dtlsauto.h): by
+default a server chooses between the TLS 1.3 and TLS 1.2 engines (or DTLS
+1.3 and 1.2) from the ClientHello, so one listener serves both and
+prefers 1.3, and a client sends one hello offering both and falls back if
+the server picks 1.2. The version is decided once; there is no
+renegotiation into another. A 1.2 server that also serves 1.3 sets the
+RFC 8446 downgrade sentinel and negotiating clients enforce it. Either end
+can be pinned to one version (for a port per version, and tests). QUIC
+stays TLS 1.3 only. In a combined hello the 1.2 client accepts X25519
+and secp384r1 ECDHE curves as well as secp256r1 (only when it also
+offered 1.3). The interop tools use the negotiating front.
 ** 0-RTT (RFC 9001 section 4.6): a client that resumes a session sends
 stream data and datagrams in its first flight under the remembered server
 limits; a server accepts them once per ticket (single use replay cache)
