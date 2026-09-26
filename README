@@ -52,9 +52,16 @@ Pre-alpha.  What exists today:
            mutual authentication
   tls12conn  TLS 1.2 over a byte stream; interoperating with OpenSSL and
            GnuTLS
+  dtlsrec  DTLS 1.3 records: unified header, record number encryption,
+           anti-replay
+  dtlshs   DTLS 1.3 handshake fragments, reassembly and ACK codecs
+  dtls     DTLS 1.3 association: the TLS 1.3 engine in DTLS mode with
+           flights, ACKs, retransmission timers and KeyUpdate
+  dtlscookie  stateless cookie exchange for servers; interoperating with
+           wolfSSL
 
 Not yet written: 0-RTT early data, loss recovery and
-congestion control, connection and stream state, DTLS.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
+congestion control, connection and stream state, DTLS 1.2.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building
 --------

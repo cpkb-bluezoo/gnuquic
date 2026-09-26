@@ -24,17 +24,32 @@ UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
   test-packet test-protect test-tparams test-kx test-sign \
   test-tlsmsg test-keysched test-tls-client test-record test-tlsconn test-tls-server \
   test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
-  test-tls12conn
+  test-tls12conn test-dtlsrec test-dtlshs test-dtls
 
 # Interoperability against independent servers (skipped if none installed).
 if HAVE_GNUTLS
 INTEROP = interop.sh
-INTEROP_PROGS = interop-client interop-server
+INTEROP_PROGS = interop-client interop-server interop-dtls
+endif
+
+# DTLS 1.3 against wolfSSL, if it is installed with DTLS 1.3.
+if HAVE_WOLFSSL
+if HAVE_GNUTLS
+INTEROP += interop-dtls.sh
+INTEROP_PROGS += wolf-dtls
+endif
 endif
 
 TESTS = $(UNIT_TESTS) $(INTEROP)
 check_PROGRAMS = $(UNIT_TESTS) $(INTEROP_PROGS)
 TESTS_ENVIRONMENT = INTEROP_CLIENT=./interop-client; export INTEROP_CLIENT; \
-  INTEROP_SERVER=./interop-server; export INTEROP_SERVER;
+  INTEROP_SERVER=./interop-server; export INTEROP_SERVER; \
+  INTEROP_DTLS=./interop-dtls; export INTEROP_DTLS; \
+  WOLF_DTLS=./wolf-dtls; export WOLF_DTLS;
 
-EXTRA_DIST = interop.sh interop-util.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
+wolf_dtls_SOURCES = wolf-dtls.c
+interop_dtls_SOURCES = interop-dtls.c
+wolf_dtls_CFLAGS = $(AM_CFLAGS) $(WOLFSSL_CFLAGS)
+wolf_dtls_LDADD = $(WOLFSSL_LIBS)
+
+EXTRA_DIST = interop-dtls.sh interop.sh interop-util.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h

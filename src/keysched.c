@@ -33,8 +33,8 @@ static int
 derive_secret (const gq_ks *ks, const char *label, const uint8_t *th,
                uint8_t *out)
 {
-  return gq_hkdf_expand_label (ks->hash, ks->secret, ks->hlen, label, th,
-                               ks->hlen, out, ks->hlen);
+  return gq_hkdf_expand_label_v (ks->hash, ks->dtls, ks->secret, ks->hlen,
+                                 label, th, ks->hlen, out, ks->hlen);
 }
 
 /* Hash of the empty string, the transcript for the "derived" steps.  */
@@ -45,7 +45,8 @@ empty_hash (const gq_ks *ks, uint8_t *out)
 }
 
 int
-gq_ks_early (gq_ks *ks, enum gq_hash hash, const uint8_t *psk, size_t psk_len)
+gq_ks_early_v (gq_ks *ks, enum gq_hash hash, const uint8_t *psk,
+               size_t psk_len, int dtls)
 {
   static const uint8_t zeros[GQ_MAX_HASH_LEN];
   size_t hl = gq_hash_size (hash);
@@ -59,10 +60,17 @@ gq_ks_early (gq_ks *ks, enum gq_hash hash, const uint8_t *psk, size_t psk_len)
   memset (ks, 0, sizeof *ks);
   ks->hash = hash;
   ks->hlen = hl;
+  ks->dtls = dtls != 0;
   ks->stage = GQ_KS_EARLY;
   /* Salt is zeros: an empty salt in HKDF-Extract is exactly that.  */
   return gq_hkdf_extract (hash, NULL, 0, psk ? psk : zeros, hl,
                           ks->secret, hl);
+}
+
+int
+gq_ks_early (gq_ks *ks, enum gq_hash hash, const uint8_t *psk, size_t psk_len)
+{
+  return gq_ks_early_v (ks, hash, psk, psk_len, 0);
 }
 
 int
@@ -185,8 +193,8 @@ gq_ks_wipe (gq_ks *ks)
   gq_wipe (ks, sizeof *ks);
 }
 
-int
-gq_finished_key (enum gq_hash hash, const uint8_t *base, uint8_t *out)
+static int
+finished_key (enum gq_hash hash, int dtls, const uint8_t *base, uint8_t *out)
 {
   size_t hl = gq_hash_size (hash);
 
@@ -194,12 +202,19 @@ gq_finished_key (enum gq_hash hash, const uint8_t *base, uint8_t *out)
     return GQ_ERR_UNSUPPORTED;
   if (base == NULL || out == NULL)
     return GQ_ERR_INVAL;
-  return gq_hkdf_expand_label (hash, base, hl, "finished", NULL, 0, out, hl);
+  return gq_hkdf_expand_label_v (hash, dtls, base, hl, "finished", NULL, 0,
+                                 out, hl);
 }
 
 int
-gq_finished_verify_data (enum gq_hash hash, const uint8_t *base,
-                         const uint8_t *th, uint8_t *out)
+gq_finished_key (enum gq_hash hash, const uint8_t *base, uint8_t *out)
+{
+  return finished_key (hash, 0, base, out);
+}
+
+int
+gq_finished_verify_data_v (enum gq_hash hash, int dtls, const uint8_t *base,
+                           const uint8_t *th, uint8_t *out)
 {
   uint8_t fk[GQ_MAX_HASH_LEN];
   size_t hl = gq_hash_size (hash);
@@ -207,7 +222,7 @@ gq_finished_verify_data (enum gq_hash hash, const uint8_t *base,
 
   if (th == NULL)
     return GQ_ERR_INVAL;
-  r = gq_finished_key (hash, base, fk);
+  r = finished_key (hash, dtls, base, fk);
   if (r == GQ_OK)
     r = gq_hmac (hash, fk, hl, th, hl, out, hl);
   gq_wipe (fk, sizeof fk);
@@ -215,8 +230,15 @@ gq_finished_verify_data (enum gq_hash hash, const uint8_t *base,
 }
 
 int
-gq_traffic_secret_update (enum gq_hash hash, const uint8_t *secret,
-                          uint8_t *next)
+gq_finished_verify_data (enum gq_hash hash, const uint8_t *base,
+                         const uint8_t *th, uint8_t *out)
+{
+  return gq_finished_verify_data_v (hash, 0, base, th, out);
+}
+
+int
+gq_traffic_secret_update_v (enum gq_hash hash, int dtls,
+                            const uint8_t *secret, uint8_t *next)
 {
   size_t hl = gq_hash_size (hash);
 
@@ -224,13 +246,20 @@ gq_traffic_secret_update (enum gq_hash hash, const uint8_t *secret,
     return GQ_ERR_UNSUPPORTED;
   if (secret == NULL || next == NULL)
     return GQ_ERR_INVAL;
-  return gq_hkdf_expand_label (hash, secret, hl, "traffic upd", NULL, 0,
-                               next, hl);
+  return gq_hkdf_expand_label_v (hash, dtls, secret, hl, "traffic upd", NULL,
+                                 0, next, hl);
 }
 
 int
-gq_traffic_keys (enum gq_aead aead, const uint8_t *secret, uint8_t *key,
-                 uint8_t iv[GQ_AEAD_NONCE_LEN])
+gq_traffic_secret_update (enum gq_hash hash, const uint8_t *secret,
+                          uint8_t *next)
+{
+  return gq_traffic_secret_update_v (hash, 0, secret, next);
+}
+
+static int
+traffic_keys (enum gq_aead aead, int dtls, const uint8_t *secret, uint8_t *key,
+              uint8_t iv[GQ_AEAD_NONCE_LEN])
 {
   enum gq_hash h = gq_aead_hash (aead);
   size_t kl = gq_aead_key_size (aead), hl = gq_hash_size (h);
@@ -239,14 +268,35 @@ gq_traffic_keys (enum gq_aead aead, const uint8_t *secret, uint8_t *key,
     return GQ_ERR_UNSUPPORTED;
   if (secret == NULL || key == NULL || iv == NULL)
     return GQ_ERR_INVAL;
-  TRY (gq_hkdf_expand_label (h, secret, hl, "key", NULL, 0, key, kl));
-  return gq_hkdf_expand_label (h, secret, hl, "iv", NULL, 0, iv,
-                               GQ_AEAD_NONCE_LEN);
+  TRY (gq_hkdf_expand_label_v (h, dtls, secret, hl, "key", NULL, 0, key, kl));
+  return gq_hkdf_expand_label_v (h, dtls, secret, hl, "iv", NULL, 0, iv,
+                                 GQ_AEAD_NONCE_LEN);
 }
 
 int
-gq_resumption_psk (enum gq_hash hash, const uint8_t *res_master,
-                   const uint8_t *nonce, size_t nonce_len, uint8_t *out)
+gq_traffic_keys (enum gq_aead aead, const uint8_t *secret, uint8_t *key,
+                 uint8_t iv[GQ_AEAD_NONCE_LEN])
+{
+  return traffic_keys (aead, 0, secret, key, iv);
+}
+
+int
+gq_traffic_keys_dtls (enum gq_aead aead, const uint8_t *secret, uint8_t *key,
+                      uint8_t iv[GQ_AEAD_NONCE_LEN], uint8_t *sn_key)
+{
+  enum gq_hash h = gq_aead_hash (aead);
+
+  TRY (traffic_keys (aead, 1, secret, key, iv));
+  if (sn_key == NULL)
+    return GQ_ERR_INVAL;
+  /* Record number encryption key (RFC 9147 section 4.2.3).  */
+  return gq_hkdf_expand_label_v (h, 1, secret, gq_hash_size (h), "sn", NULL,
+                                 0, sn_key, gq_aead_key_size (aead));
+}
+
+int
+gq_resumption_psk_v (enum gq_hash hash, int dtls, const uint8_t *res_master,
+                     const uint8_t *nonce, size_t nonce_len, uint8_t *out)
 {
   size_t hl = gq_hash_size (hash);
 
@@ -254,6 +304,13 @@ gq_resumption_psk (enum gq_hash hash, const uint8_t *res_master,
     return GQ_ERR_UNSUPPORTED;
   if (res_master == NULL || out == NULL || (nonce == NULL && nonce_len))
     return GQ_ERR_INVAL;
-  return gq_hkdf_expand_label (hash, res_master, hl, "resumption", nonce,
-                               nonce_len, out, hl);
+  return gq_hkdf_expand_label_v (hash, dtls, res_master, hl, "resumption",
+                                 nonce, nonce_len, out, hl);
+}
+
+int
+gq_resumption_psk (enum gq_hash hash, const uint8_t *res_master,
+                   const uint8_t *nonce, size_t nonce_len, uint8_t *out)
+{
+  return gq_resumption_psk_v (hash, 0, res_master, nonce, nonce_len, out);
 }

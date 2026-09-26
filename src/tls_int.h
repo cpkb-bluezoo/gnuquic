@@ -55,6 +55,10 @@ struct gq_tls
   gq_tls_sink sink;
   enum state st;
   int quic;
+  int dtls;			/* DTLS 1.3 (RFC 9147).  */
+  int primed;			/* Server: continuing a stateless retry.  */
+  gq_tls_dtls_prime prime;
+  int ku_busy;			/* DTLS: a KeyUpdate of ours is unacknowledged.  */
 
   /* Negotiable parameters after policy filtering.  */
   uint16_t suites[MAX_SUITES];

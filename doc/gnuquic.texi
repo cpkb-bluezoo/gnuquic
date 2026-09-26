@@ -261,6 +261,7 @@ that everything excluded here is rejected.
 * Versions::
 * Cipher suites::
 * TLS 1.2 hardening::
+* DTLS 1.3::
 * Key exchange::
 * Signatures and certificates::
 * Server behaviour::
@@ -274,7 +275,7 @@ that everything excluded here is rejected.
 @headitem Transport @tab Versions
 @item QUIC @tab TLS 1.3 only (required by RFC 9001)
 @item TCP  @tab TLS 1.3 (@file{tlsconn.h}) or TLS 1.2 (@file{tls12conn.h})
-@item UDP  @tab DTLS 1.3, DTLS 1.2 (planned)
+@item UDP  @tab DTLS 1.3 (@file{dtls.h}); DTLS 1.2 (planned)
 @end multitable
 
 SSL 3.0, TLS 1.0, TLS 1.1 and DTLS 1.0 are not implemented.  A TLS
@@ -382,6 +383,72 @@ nothing to protect.  A TLS 1.2 server refuses a ClientHello that lists
 @code{supported_versions} without TLS 1.2 (@code{protocol_version}); a
 TLS 1.2 client refuses a ServerHello that carries the extension.
 @end itemize
+
+@node DTLS 1.3
+@section DTLS 1.3
+@cindex DTLS
+@cindex cookie
+
+DTLS 1.3 (RFC 9147) is the TLS 1.3 handshake engine in DTLS mode, so the
+suites, groups, signature schemes, resumption and client authentication
+are exactly those of TLS 1.3, including the hybrid post-quantum groups.
+What is DTLS's own is in @file{dtlsrec.h}, @file{dtlshs.h},
+@file{dtls.h} and @file{dtlscookie.h}, and follows RFC 9147:
+
+@itemize @bullet
+@item
+Every HKDF label has the @samp{dtls13} prefix (no trailing space), and
+record sequence numbers are encrypted with a per-epoch key, using the
+same mask construction as QUIC header protection.  The nonce uses the
+64-bit sequence number without the epoch.
+
+@item
+Records carry a 16-bit sequence number and an explicit length; records
+with a connection ID are not ours (connection IDs are not implemented).
+A record that fails authentication or is replayed is dropped silently,
+never answered, and a plaintext alert is honoured only while nothing has
+been protected yet, so nothing that can be forged from outside kills an
+association.
+
+@item
+Handshake messages are fragmented to the datagram size and reassembled,
+whatever the order, duplication and overlap.  Only the message being
+assembled is kept (a later message is dropped and asked for again), so
+the memory per association is bounded by one message.
+
+@item
+Handshake flights are retransmitted with the RFC 9147 backoff (1 s
+doubling to 60 s, six retries by default), fragment by fragment: what
+the peer has acknowledged is not sent again.  ACKs are sent for the last
+flight of the handshake, for tickets and key updates, and when a flight
+arrives out of order or incomplete.
+
+@item
+KeyUpdate moves to the next epoch, and the sender switches only when its
+KeyUpdate is acknowledged.  Rekeying is automatic before the AEAD record
+limit.
+
+@item
+Address validation is stateless.  @code{gq_dtls_listen} answers a first
+ClientHello with a HelloRetryRequest whose cookie (16 bytes of
+HMAC-SHA256 over the client address and the cookie's own fields,
+rotating secrets) also carries what the transcript needs, so a source
+that cannot receive at its address never gets an association, and the
+reply is always smaller than the request.  The client therefore sends a
+small first ClientHello (one classical key share, or none when only
+hybrid groups are configured) and puts the cookie first in the second;
+the server's retry then asks for its preferred group, so hybrid
+post-quantum groups are still used.
+
+@item
+Not implemented: 0-RTT (early data), connection IDs, post-handshake
+client authentication and DTLS 1.2, which will be @file{dtls12.h}.
+@end itemize
+
+Verified against wolfSSL 5.9 as an independent DTLS 1.3 peer in both
+directions (@file{tests/interop-dtls.sh}), including cookies, hybrid
+groups, fragmentation, packet loss, KeyUpdate, resumption and client
+certificates.
 
 @node Key exchange
 @section Key exchange
@@ -605,8 +672,12 @@ by interoperability scenarios against @command{openssl} and GnuTLS in
 both directions.
 
 @item
-DTLS 1.3 and 1.2: record layers, reassembly, retransmission, replay
-window and cookies.
+@strong{Done for DTLS 1.3, to do for 1.2.}  DTLS 1.3 (RFC 9147): the
+record layer with record number encryption and anti-replay, handshake
+fragmentation and reassembly, flights with ACKs and retransmission,
+KeyUpdate, and stateless cookies (@ref{DTLS 1.3}).  DTLS 1.2 (RFC 6347)
+follows, reusing the TLS 1.2 engine with the same reassembly and
+retransmission code.  Still open for DTLS 1.3: 0-RTT and connection IDs.
 
 @item
 Examples: an HTTP/3 (QPACK) client and server and a DoQ (RFC 9250)

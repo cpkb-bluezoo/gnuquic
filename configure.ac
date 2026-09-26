@@ -86,6 +86,21 @@ AS_IF([test "x$with_gnutls" != xno], [GNUTLS_PC_REQUIRES=gnutls])
 AC_SUBST([GNUTLS_PC_REQUIRES])
 AM_CONDITIONAL([HAVE_GNUTLS], [test "x$with_gnutls" != xno])
 
+dnl wolfSSL is an optional test dependency: an independent DTLS 1.3 peer for
+dnl the interoperability tests (tests/interop-dtls.sh).  The library itself
+dnl never uses it.
+AC_ARG_WITH([wolfssl],
+  [AS_HELP_STRING([--with-wolfssl],
+     [build the DTLS 1.3 interoperability peer against wolfSSL @<:@default=check@:>@])],
+  [], [with_wolfssl=check])
+have_wolfssl=no
+AS_IF([test "x$with_wolfssl" != xno],
+  [PKG_CHECK_MODULES([WOLFSSL], [wolfssl],
+     [have_wolfssl=yes],
+     [AS_IF([test "x$with_wolfssl" = xyes],
+        [AC_MSG_ERROR([wolfSSL not found])])])])
+AM_CONDITIONAL([HAVE_WOLFSSL], [test "x$have_wolfssl" = xyes])
+
 dnl Warnings.  GNU QUIC is expected to build with zero warnings.
 AC_ARG_ENABLE([warnings],
   [AS_HELP_STRING([--disable-warnings], [do not add extra compiler warnings])],

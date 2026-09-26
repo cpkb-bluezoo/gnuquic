@@ -52,6 +52,8 @@ gq_tls_server_new (gq_tls **out, const gq_tls_server_config *cfg,
   quic = cfg->quic || cfg->transport_params != NULL;
   if (quic && (cfg->transport_params == NULL || cfg->n_alpn == 0))
     return GQ_ERR_INVAL;
+  if (cfg->dtls && quic)
+    return GQ_ERR_INVAL;
   if (cfg->n_alpn && cfg->alpn == NULL)
     return GQ_ERR_INVAL;
   /* Never ask for client certificates without a way to check them.  */
@@ -67,6 +69,13 @@ gq_tls_server_new (gq_tls **out, const gq_tls_server_config *cfg,
   t->scfg = *cfg;
   t->sink = *sink;
   t->quic = quic;
+  t->dtls = cfg->dtls != 0;
+  if (t->dtls)
+    {
+      /* No 0-RTT over DTLS here; the cookie is the listener's job.  */
+      t->scfg.max_early_data = 0;
+      t->scfg.hello_retry_cookie = 0;
+    }
   t->alert = -1;
   /* Reuse the fields the shared code reads from the client config.  */
   t->cfg.alpn = cfg->alpn;
@@ -86,6 +95,19 @@ gq_tls_server_new (gq_tls **out, const gq_tls_server_config *cfg,
     }
   t->st = ST_S_WAIT_CH1;
   *out = t;
+  return GQ_OK;
+}
+
+int
+gq_tls_server_prime (gq_tls *t, const gq_tls_dtls_prime *p)
+{
+  if (t == NULL || p == NULL || !t->dtls || t->role != ROLE_SERVER
+      || t->st != ST_S_WAIT_CH1 || t->primed || p->hrr_len == 0
+      || p->hrr_len > sizeof p->hrr
+      || !gqi_in_list (t->suites, t->n_suites, p->suite))
+    return GQ_ERR_INVAL;
+  t->prime = *p;
+  t->primed = 1;
   return GQ_OK;
 }
 
@@ -136,6 +158,13 @@ struct choice
   gq_slice psk_ids, psk_binders;
   const uint8_t *binders_start;
 };
+
+static int
+is_hybrid_group (unsigned g)
+{
+  return g == GQ_GROUP_SECP256R1_MLKEM768 || g == GQ_GROUP_X25519_MLKEM768
+    || g == GQ_GROUP_SECP384R1_MLKEM1024;
+}
 
 /* Check each key_share entry: group must be one the client says it
    supports, and no group repeats (RFC 8446 section 4.2.8).  */
@@ -232,9 +261,10 @@ send_flight (gq_tls *t, unsigned group, gq_slice kx)
     }
   memset (&sp, 0, sizeof sp);
   sp.random = rnd;
-  sp.session_id_echo = (gq_slice) { t->sid, t->sid_len };
+  sp.session_id_echo = (gq_slice) { t->sid, t->dtls ? 0 : t->sid_len };
   sp.cipher_suite = t->suite;
   sp.group = (uint16_t) group;
+  sp.dtls = t->dtls;
   sp.key_exchange = (gq_slice) { sh_kx, slen };
   sp.psk_selected = t->resumed;
   sp.psk_identity = (uint16_t) t->psk_index;
@@ -244,8 +274,9 @@ send_flight (gq_tls *t, unsigned group, gq_slice kx)
   r = send_at (t, GQ_LEVEL_INITIAL, &w);
 
   if (r == GQ_OK)
-    r = t->resumed ? gq_ks_early (&t->ks, t->hash, t->sess.psk, t->hlen)
-                   : gq_ks_early (&t->ks, t->hash, NULL, 0);
+    r = t->resumed ? gq_ks_early_v (&t->ks, t->hash, t->sess.psk, t->hlen,
+                                    t->dtls)
+                   : gq_ks_early_v (&t->ks, t->hash, NULL, 0, t->dtls);
   /* 0-RTT: accept only a first use of this ticket, and only if no
      HelloRetryRequest happened.  The key comes from the early secret
      before the handshake secret replaces it.  */
@@ -383,7 +414,8 @@ send_flight (gq_tls *t, unsigned group, gq_slice kx)
   if (r == GQ_OK)
     {
       if (gqi_tr_hash (t, th) != GQ_OK
-          || gq_finished_verify_data (t->hash, t->shs, th, vd) != GQ_OK)
+          || gq_finished_verify_data_v (t->hash, t->dtls, t->shs, th, vd)
+             != GQ_OK)
         r = gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
       else
         {
@@ -418,7 +450,8 @@ send_hrr (gq_tls *t, unsigned group)
 
   memset (&sp, 0, sizeof sp);
   sp.hello_retry_request = 1;
-  sp.session_id_echo = (gq_slice) { t->sid, t->sid_len };
+  sp.dtls = t->dtls;
+  sp.session_id_echo = (gq_slice) { t->sid, t->dtls ? 0 : t->sid_len };
   sp.cipher_suite = t->suite;
   sp.group = (uint16_t) group;
   if (t->scfg.hello_retry_cookie)
@@ -534,11 +567,11 @@ verify_binder (gq_tls *t, gq_slice msg, const struct choice *c)
     r = gq_transcript_hash (tmp, th, t->hlen);
   gq_transcript_free (tmp);
   if (r == GQ_OK)
-    r = gq_ks_early (&ks, t->hash, t->sess.psk, t->hlen);
+    r = gq_ks_early_v (&ks, t->hash, t->sess.psk, t->hlen, t->dtls);
   if (r == GQ_OK)
     r = gq_ks_binder_key (&ks, 1, bk);
   if (r == GQ_OK)
-    r = gq_finished_verify_data (t->hash, bk, th, want);
+    r = gq_finished_verify_data_v (t->hash, t->dtls, bk, th, want);
   gq_wipe (bk, sizeof bk);
   gq_ks_wipe (&ks);
   if (r != GQ_OK)
@@ -594,15 +627,20 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
   r = gq_client_hello_parse (body, &ch);
   if (r != GQ_OK)
     return gqi_fail_parse (t, r);
-  if (ch.legacy_version < 0x0303)
+  if (t->dtls
+      ? ch.legacy_version != 0xfefd : ch.legacy_version < 0x0303)
     return gqi_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
+  /* RFC 9147 section 5.3: a DTLS 1.3 client sends an empty legacy_cookie.  */
+  if (t->dtls && ch.legacy_cookie.len != 0)
+    return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
 
-  /* Only TLS 1.3 is served: the client must offer it explicitly.  */
+  /* Only TLS 1.3 (or DTLS 1.3) is served: the client must offer it
+     explicitly.  */
   if (!gq_ext_find (ch.extensions, GQ_EXT_SUPPORTED_VERSIONS, &v))
     return gqi_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
   if (gq_list_u16 (v, 1, &list) != GQ_OK)
     return gqi_fail (t, GQ_ALERT_DECODE_ERROR, GQ_ERR_ENCODING);
-  if (!gq_u16_contains (list, 0x0304))
+  if (!gq_u16_contains (list, t->dtls ? 0xfefc : 0x0304))
     return gqi_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
 
   /* A pre_shared_key must come last, with its modes extension.  */
@@ -740,8 +778,28 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
       memcpy (t->ch_suites_hash, suites_hash, 32);
       memcpy (t->sid, ch.session_id.data, ch.session_id.len);
       t->sid_len = ch.session_id.len;
+      if (t->primed && t->suite != t->prime.suite)
+        return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
       if (gq_transcript_new (&t->tr, t->hash) != GQ_OK)
         return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+      if (t->primed)
+        {
+          /* ClientHello1 as message_hash, then the retry we (statelessly)
+             sent, exactly as if this engine had done it.  */
+          uint8_t mh[4];
+
+          mh[0] = GQ_HS_MESSAGE_HASH;
+          mh[1] = 0;
+          mh[2] = 0;
+          mh[3] = (uint8_t) t->hlen;
+          if (gq_transcript_update (t->tr, mh, 4) != GQ_OK
+              || gq_transcript_update (t->tr, t->prime.ch1_hash, t->hlen)
+                 != GQ_OK
+              || gq_transcript_update (t->tr, t->prime.hrr,
+                                       t->prime.hrr_len) != GQ_OK)
+            return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
+          t->info.hello_retry = 1;
+        }
       t->resumed = have_sess;
 
       if (!t->resumed)
@@ -812,7 +870,17 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
     }
 
   /* Key exchange group.  */
-  if (second)
+  if (t->primed && t->prime.group)
+    {
+      /* The retry asked for one group: one share, for that group.  */
+      rest = c.shares;
+      if (gq_key_share_next (&rest, &g, &kx) != 1 || g != t->prime.group
+          || rest.len != 0)
+        return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
+      group = g;
+      have_share = 1;
+    }
+  else if (second)
     {
       /* Exactly one share, for the group we asked for.  */
       rest = c.shares;
@@ -841,6 +909,17 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
       if (!have_share)
         {
           /* Ask for the most preferred group we share with the client.  */
+          /* A second retry is not allowed after a stateless one.  */
+          if (t->primed)
+            return gqi_fail (t, GQ_ALERT_HANDSHAKE_FAILURE, GQ_ERR_UNSUPPORTED);
+          /* Over DTLS without a cookie listener a group whose share does
+             not fit a datagram is only a last resort: a client will not
+             fragment its second hello unless the retry carries a cookie.  */
+          if (t->dtls)
+            for (i = 0; i < t->n_groups; i++)
+              if (gq_u16_contains (c.groups, t->groups[i])
+                  && !is_hybrid_group (t->groups[i]))
+                return send_hrr (t, t->groups[i]);
           for (i = 0; i < t->n_groups; i++)
             if (gq_u16_contains (c.groups, t->groups[i]))
               return send_hrr (t, t->groups[i]);
@@ -981,7 +1060,7 @@ send_tickets (gq_tls *t)
       memset (&s, 0, sizeof s);
       nonce[0] = (uint8_t) i;
       s.cipher_suite = t->suite;
-      r = gq_resumption_psk (t->hash, t->resm, nonce, 1, s.psk);
+      r = gq_resumption_psk_v (t->hash, t->dtls, t->resm, nonce, 1, s.psk);
       if (r == GQ_OK)
         r = gqi_rnd (t, age, sizeof age);
       if (r != GQ_OK)
@@ -1044,7 +1123,8 @@ on_client_finished (gq_tls *t, gq_slice msg, gq_slice body)
   if (r != GQ_OK)
     return gqi_fail_parse (t, r);
   if (gqi_tr_hash (t, th) != GQ_OK
-      || gq_finished_verify_data (t->hash, t->chs, th, want) != GQ_OK)
+      || gq_finished_verify_data_v (t->hash, t->dtls, t->chs, th, want)
+         != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   if (!gq_ct_equal (want, verify.data, t->hlen))
     return gqi_fail (t, GQ_ALERT_DECRYPT_ERROR, GQ_ERR_CRYPTO);

@@ -42,6 +42,7 @@ gq_strerror (int status)
     case GQ_ERR_CERT:		return _("certificate rejected");
     case GQ_ERR_UNAVAILABLE:	return _("feature not compiled in");
     case GQ_ERR_PROTOCOL:	return _("protocol violation");
+    case GQ_ERR_TIMEOUT:	return _("peer stopped answering");
     default:			return _("unknown status");
     }
 }

@@ -215,6 +215,9 @@ gq_tls_client_new (gq_tls **out, const gq_tls_config *cfg,
   if ((cfg->quic || cfg->transport_params)
       && (cfg->transport_params == NULL || cfg->n_alpn == 0))
     return GQ_ERR_INVAL;
+  /* DTLS 1.3 has no 0-RTT here and is not QUIC.  */
+  if (cfg->dtls && (cfg->quic || cfg->transport_params || cfg->early_data))
+    return GQ_ERR_INVAL;
   if (cfg->n_alpn && cfg->alpn == NULL)
     return GQ_ERR_INVAL;
   TRY (gq_crypto_init ());
@@ -226,6 +229,7 @@ gq_tls_client_new (gq_tls **out, const gq_tls_config *cfg,
   t->cfg = *cfg;
   t->sink = *sink;
   t->quic = cfg->quic || cfg->transport_params != NULL;
+  t->dtls = cfg->dtls != 0;
   t->alert = -1;
   if (t->cfg.max_message_len == 0)
     t->cfg.max_message_len = 65536;
@@ -293,15 +297,17 @@ static const uint16_t cert_only_sigs[] = { 0x0401, 0x0501, 0x0601 };
 static void
 put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
 {
-  size_t i, nshares = second ? 1 : t->n_kx;
+  size_t i, nshares = second ? (t->n_kx ? 1 : 0) : t->n_kx;
   static const uint8_t zeros[GQ_MAX_HASH_LEN];
 
   gq_wbuf_hs_open (w, GQ_HS_CLIENT_HELLO);
-  gq_wbuf_u16 (w, 0x0303);
+  gq_wbuf_u16 (w, t->dtls ? 0xfefd : 0x0303);
   gq_wbuf_bytes (w, t->random, 32);
   gq_wbuf_open (w, 1);
   gq_wbuf_bytes (w, t->sid, t->sid_len);
   gq_wbuf_close (w);
+  if (t->dtls)			/* legacy_cookie: always empty (RFC 9147 5.3).  */
+    gq_wbuf_u8 (w, 0);
   gq_wbuf_open (w, 2);
   for (i = 0; i < t->n_suites; i++)
     gq_wbuf_u16 (w, t->suites[i]);
@@ -311,6 +317,16 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
   gq_wbuf_close (w);
 
   gq_wbuf_open (w, 2);
+  if (t->dtls && second && t->cookie_len)
+    {
+      /* First, so that it is in the first fragment of a fragmented hello
+         (see dtlscookie.h).  */
+      gq_wbuf_ext_open (w, GQ_EXT_COOKIE);
+      gq_wbuf_open (w, 2);
+      gq_wbuf_bytes (w, t->cookie, t->cookie_len);
+      gq_wbuf_close (w);
+      gq_wbuf_close (w);
+    }
   if (t->cfg.server_name)
     {
       gq_wbuf_ext_open (w, GQ_EXT_SERVER_NAME);
@@ -344,7 +360,7 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, GQ_EXT_SUPPORTED_VERSIONS);
   gq_wbuf_open (w, 1);
-  gq_wbuf_u16 (w, 0x0304);
+  gq_wbuf_u16 (w, t->dtls ? 0xfefc : 0x0304);
   gq_wbuf_close (w);
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, GQ_EXT_KEY_SHARE);
@@ -377,7 +393,7 @@ put_ch (gq_tls *t, gq_wbuf *w, int second, size_t *binders_off)
       gq_wbuf_bytes (w, t->cfg.transport_params, t->cfg.transport_params_len);
       gq_wbuf_close (w);
     }
-  if (second && t->cookie_len)
+  if (second && t->cookie_len && !t->dtls)
     {
       gq_wbuf_ext_open (w, GQ_EXT_COOKIE);
       gq_wbuf_open (w, 2);
@@ -447,11 +463,11 @@ fill_binder (gq_tls *t, uint8_t *buf, size_t len, size_t boff, int second)
     r = gq_transcript_hash (tmp, th, hl);
   gq_transcript_free (tmp);
   if (r == GQ_OK)
-    r = gq_ks_early (&ks, s->hash, s->psk, hl);
+    r = gq_ks_early_v (&ks, s->hash, s->psk, hl, t->dtls);
   if (r == GQ_OK)
     r = gq_ks_binder_key (&ks, 1, bk);
   if (r == GQ_OK)
-    r = gq_finished_verify_data (s->hash, bk, th, buf + len - hl);
+    r = gq_finished_verify_data_v (s->hash, t->dtls, bk, th, buf + len - hl);
   gq_wipe (bk, sizeof bk);
   gq_ks_wipe (&ks);
   return r;
@@ -499,7 +515,7 @@ send_ch (gq_tls *t, int second)
       gqi_suite_params (o->cipher_suite, &a, &h);
       r = gq_hash_compute (h, buf, w.len, th, o->psk_len);
       if (r == GQ_OK)
-        r = gq_ks_early (&ks, h, o->psk, o->psk_len);
+        r = gq_ks_early_v (&ks, h, o->psk, o->psk_len, t->dtls);
       if (r == GQ_OK)
         r = gq_ks_client_early_traffic (&ks, th, sec);
       if (r == GQ_OK)
@@ -523,10 +539,10 @@ gq_tls_start (gq_tls *t)
     return GQ_ERR_INVAL;
 
   TRY (gqi_rnd (t, t->random, 32));
-  if (!t->quic)
+  if (!t->quic && !t->dtls)
     {
       /* Compatibility session ID for middleboxes (RFC 8446 appendix D.4).
-         QUIC sends an empty one.  */
+         QUIC and DTLS send an empty one.  */
       t->sid_len = 32;
       TRY (gqi_rnd (t, t->sid, 32));
     }
@@ -535,9 +551,25 @@ gq_tls_start (gq_tls *t)
      plain-curve share too so a server without post-quantum support does
      not force a HelloRetryRequest.  */
   first = t->groups[0];
-  TRY (gen_kx (t, first, &t->kx[0]));
-  t->n_kx = 1;
-  if (is_hybrid (first))
+  if (t->dtls && is_hybrid (first))
+    {
+      /* A big first hello would need several datagrams, which a server
+         answering statelessly (dtlscookie.h) cannot judge.  Offer one
+         small share; a server that wants the hybrid group asks for it in
+         its HelloRetryRequest, which the cookie exchange needs anyway.  */
+      for (i = 0; i < t->n_groups; i++)
+        if (!is_hybrid (t->groups[i])
+            && (first == t->groups[0] || t->groups[i] == GQ_GROUP_X25519))
+          first = t->groups[i];
+    }
+  if (t->dtls && is_hybrid (first))
+    t->n_kx = 0;	/* Only hybrids: no share yet, let the server ask.  */
+  else
+    {
+      TRY (gen_kx (t, first, &t->kx[0]));
+      t->n_kx = 1;
+    }
+  if (is_hybrid (first) && !t->dtls)
     {
       want = 0;
       for (i = 0; i < t->n_groups; i++)
@@ -644,7 +676,7 @@ on_hrr (gq_tls *t, gq_slice msg, const gq_server_hello *sh)
     switch (type)
       {
       case GQ_EXT_SUPPORTED_VERSIONS:
-        if (gq_ext_u16 (v, &ver) != GQ_OK || ver != 0x0304)
+        if (gq_ext_u16 (v, &ver) != GQ_OK || ver != (t->dtls ? 0xfefc : 0x0304))
           return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
         have_ver = 1;
         break;
@@ -725,7 +757,7 @@ on_server_hello (gq_tls *t, gq_slice msg, gq_slice body)
         return gqi_fail (t, GQ_ALERT_UNEXPECTED_MESSAGE, GQ_ERR_PROTOCOL);
       return on_hrr (t, msg, &sh);
     }
-  if (sh.legacy_version != 0x0303)
+  if (sh.legacy_version != (t->dtls ? 0xfefd : 0x0303))
     return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
   if (sh.session_id_echo.len != t->sid_len
       || memcmp (sh.session_id_echo.data, t->sid, t->sid_len) != 0)
@@ -769,7 +801,7 @@ on_server_hello (gq_tls *t, gq_slice msg, gq_slice body)
   /* No supported_versions means the server chose an older protocol.  */
   if (!have_ver)
     return gqi_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
-  if (ver != 0x0304)
+  if (ver != (t->dtls ? 0xfefc : 0x0304))
     return gqi_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
   if (!have_ks)
     return gqi_fail (t, GQ_ALERT_MISSING_EXTENSION, GQ_ERR_PROTOCOL);
@@ -801,8 +833,9 @@ on_server_hello (gq_tls *t, gq_slice msg, gq_slice body)
   t->info.group = group;
   t->info.cipher_suite = sh.cipher_suite;
 
-  r = t->resumed ? gq_ks_early (&t->ks, t->hash, t->offered->psk, t->hlen)
-                 : gq_ks_early (&t->ks, t->hash, NULL, 0);
+  r = t->resumed ? gq_ks_early_v (&t->ks, t->hash, t->offered->psk, t->hlen,
+                                  t->dtls)
+                 : gq_ks_early_v (&t->ks, t->hash, NULL, 0, t->dtls);
   if (r == GQ_OK)
     r = gq_ks_handshake (&t->ks, shared, shared_len);
   gq_wipe (shared, sizeof shared);
@@ -1136,7 +1169,8 @@ on_finished (gq_tls *t, gq_slice msg, gq_slice body)
   if (r != GQ_OK)
     return gqi_fail_parse (t, r);
   if (gqi_tr_hash (t, th) != GQ_OK
-      || gq_finished_verify_data (t->hash, t->shs, th, want) != GQ_OK)
+      || gq_finished_verify_data_v (t->hash, t->dtls, t->shs, th, want)
+         != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   if (!gq_ct_equal (want, verify.data, t->hlen))
     return gqi_fail (t, GQ_ALERT_DECRYPT_ERROR, GQ_ERR_CRYPTO);
@@ -1179,7 +1213,8 @@ on_finished (gq_tls *t, gq_slice msg, gq_slice body)
 
   /* Client Finished.  */
   if (gqi_tr_hash (t, th) != GQ_OK
-      || gq_finished_verify_data (t->hash, t->chs, th, want) != GQ_OK)
+      || gq_finished_verify_data_v (t->hash, t->dtls, t->chs, th, want)
+         != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   gq_wbuf_init (&w, fin, sizeof fin);
   {
@@ -1232,7 +1267,7 @@ on_new_session_ticket (gq_tls *t, gq_slice body)
     if (type == GQ_EXT_EARLY_DATA
         && gq_ext_early_data_nst (v, &tk.max_early_data) != GQ_OK)
       return gqi_fail (t, GQ_ALERT_DECODE_ERROR, GQ_ERR_ENCODING);
-  if (gq_resumption_psk (t->hash, t->resm, n.nonce.data, n.nonce.len,
+  if (gq_resumption_psk_v (t->hash, t->dtls, t->resm, n.nonce.data, n.nonce.len,
                          tk.psk) != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   r = t->sink.ticket (t->sink.user, &tk);
@@ -1260,7 +1295,8 @@ rekey_write (gq_tls *t)
 {
   uint8_t next[GQ_MAX_HASH_LEN];
 
-  if (gq_traffic_secret_update (t->hash, write_secret (t), next) != GQ_OK)
+  if (gq_traffic_secret_update_v (t->hash, t->dtls, write_secret (t), next)
+      != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   memcpy (write_secret (t), next, t->hlen);
   gq_wipe (next, sizeof next);
@@ -1280,15 +1316,17 @@ gqi_on_key_update (gq_tls *t, gq_slice body)
   r = gq_key_update_parse (body, &request);
   if (r != GQ_OK)
     return gqi_fail_parse (t, r);
-  if (gq_traffic_secret_update (t->hash, read_secret (t), next) != GQ_OK)
+  if (gq_traffic_secret_update_v (t->hash, t->dtls, read_secret (t), next)
+      != GQ_OK)
     return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_CRYPTO);
   memcpy (read_secret (t), next, t->hlen);
   gq_wipe (next, sizeof next);
   TRY (gqi_emit_secret (t, GQ_LEVEL_APPLICATION, GQ_DIR_READ,
                         read_secret (t)));
-  if (request)
+  if (request && !t->ku_busy)
     {
-      /* Answer under the old write keys, then switch.  */
+      /* Answer under the old write keys, then switch.  (DTLS: not while
+         one of ours is unacknowledged; RFC 9147 section 8.)  */
       gq_wbuf_init (&w, msg, sizeof msg);
       gq_build_key_update (&w, 0);
       TRY (gqi_emit (t, GQ_LEVEL_APPLICATION, msg, w.len));
@@ -1303,7 +1341,7 @@ gq_tls_key_update (gq_tls *t, int request_peer)
   uint8_t msg[8];
   gq_wbuf w;
 
-  if (t == NULL || t->st != ST_CONNECTED || t->quic)
+  if (t == NULL || t->st != ST_CONNECTED || t->quic || t->ku_busy)
     return GQ_ERR_INVAL;
   gq_wbuf_init (&w, msg, sizeof msg);
   gq_build_key_update (&w, request_peer);
@@ -1460,6 +1498,13 @@ gq_tls_feed (gq_tls *t, enum gq_level level, const uint8_t **buf, size_t *len)
   return GQ_OK;
 }
 
+void
+gq_tls_set_key_update_busy (gq_tls *t, int busy)
+{
+  if (t)
+    t->ku_busy = busy != 0;
+}
+
 int
 gq_tls_is_complete (const gq_tls *t)
 {
@@ -1489,10 +1534,10 @@ gq_tls_export (const gq_tls *t, const char *label, const uint8_t *context,
     return GQ_ERR_INVAL;
   TRY (gq_hash_compute (t->hash, "", 0, eh, t->hlen));
   TRY (gq_hash_compute (t->hash, context, context_len, ch, t->hlen));
-  TRY (gq_hkdf_expand_label (t->hash, t->exp, t->hlen, label, eh, t->hlen,
-                             derived, t->hlen));
-  return gq_hkdf_expand_label (t->hash, derived, t->hlen, "exporter", ch,
-                               t->hlen, out, out_len);
+  TRY (gq_hkdf_expand_label_v (t->hash, t->dtls, t->exp, t->hlen, label, eh,
+                               t->hlen, derived, t->hlen));
+  return gq_hkdf_expand_label_v (t->hash, t->dtls, derived, t->hlen,
+                                 "exporter", ch, t->hlen, out, out_len);
 }
 
 /* ------------------------------------------------------------------ */
