@@ -395,6 +395,11 @@ void gq_tls_set_key_update_busy (gq_tls *tls, int busy);
 int gq_tls_server_new (gq_tls **out, const gq_tls_server_config *config,
                        const gq_tls_sink *sink);
 
+/* Server: replace the ticket key ring.  QUIC does this from the
+   peer_params callback (which runs before tickets are read) to select the
+   ring bound to the QUIC version in use.  */
+void gq_tls_server_set_ticket_keys (gq_tls *tls, gq_ticket_keys *keys);
+
 /* Server: nonzero if the client offered 0-RTT data and this engine
    declined it.  The transport should then discard the undecryptable early
    records that follow (see gq_record_set_skip_budget).  */

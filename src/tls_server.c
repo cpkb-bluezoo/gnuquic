@@ -506,6 +506,12 @@ psk_acceptable (gq_tls *t, const gq_session_state *s, const gq_client_hello *ch,
   return 1;
 }
 
+void
+gq_tls_server_set_ticket_keys (gq_tls *t, gq_ticket_keys *keys)
+{
+  t->scfg.ticket_keys = keys;
+}
+
 /* Find the first identity that opens and is acceptable.  */
 static int
 choose_psk (gq_tls *t, const gq_client_hello *ch, const struct choice *c)
@@ -737,6 +743,12 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
       if (!gq_ext_find (ch.extensions, GQ_EXT_QUIC_TRANSPORT_PARAMETERS, &c.tp))
         return gqi_fail (t, GQ_ALERT_MISSING_EXTENSION, GQ_ERR_PROTOCOL);
       c.have_tp = 1;
+      /* Deliver them now, before tickets are read: the transport may
+         settle things (QUIC: the version, which selects the ticket keys)
+         from the client's parameters.  Once, with the first ClientHello.  */
+      if (!second && t->sink.peer_params
+          && t->sink.peer_params (t->sink.user, c.tp.data, c.tp.len))
+        return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER);
     }
   if (gq_ext_find (ch.extensions, GQ_EXT_COOKIE, &v))
     {
@@ -927,9 +939,6 @@ on_client_hello (gq_tls *t, gq_slice msg, gq_slice body)
         }
     }
 
-  if (c.have_tp && t->sink.peer_params
-      && t->sink.peer_params (t->sink.user, c.tp.data, c.tp.len))
-    return gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER);
   return send_flight (t, group, kx);
 }
 

@@ -141,23 +141,30 @@ typedef struct gq_conn_events
   void (*cid_retired) (void *user, const uint8_t *cid, size_t len);
   /* Client: NEW_TOKEN from the server, to keep for a later connection.  */
   void (*new_token) (void *user, const uint8_t *token, size_t len);
-  /* Client: session ticket for resumption.  */
-  void (*ticket) (void *user, const gq_tls_ticket *ticket);
+  /* Client: session ticket for resumption, with the QUIC version of this
+     connection.  A ticket is good only for connections of the version it
+     came from (RFC 9369 section 5): offer it (gq_tls_config.resume) only
+     on a connection that starts in that version; a server refuses it
+     otherwise and the handshake runs in full.  */
+  void (*ticket) (void *user, const gq_tls_ticket *ticket, uint32_t version);
 } gq_conn_events;
 
 /* Zero means the default in every field.  */
 typedef struct gq_conn_config
 {
-  uint32_t version;			/* GQ_VERSION_1 (default) or 2.  A
-					   client's first flight; a server's
-					   version when versions is empty.  */
-  /* Versions this endpoint is willing to use, most preferred first (RFC
-     9368; at most GQ_TP_MAX_VERSIONS).  Empty: just VERSION.  A server
-     serves any Initial whose version is listed and may switch to a
-     preferred compatible version (v1 and v2 are compatible); a client
-     offers them, restarts after a Version Negotiation packet with the
-     first listed version the server has, and accepts a compatible switch
-     to a listed version.  */
+  /* Versions (RFC 9369, RFC 9368).  VERSIONS lists those this endpoint
+     is willing to use, most preferred first; empty means GQ_VERSION_2 and
+     GQ_VERSION_1, newest first, or just VERSION if that is set.  A server
+     serves any Initial whose version is listed and then follows the
+     client's own order among the compatible versions both list (v1 and v2
+     are compatible), switching the connection during the handshake if
+     that is not the version the client started with.  A client starts in
+     VERSION, or if that is zero in the oldest listed version, the one a
+     server is most likely to parse (RFC 9368 section 2.5), offering the
+     compatible others; it restarts after a Version Negotiation packet with
+     the first listed version the server has, and accepts a compatible
+     switch to a listed version.  */
+  uint32_t version;
   uint32_t versions[GQ_TP_MAX_VERSIONS];
   size_t n_versions;
   uint64_t idle_timeout_ms;		/* 0: 30000.  */

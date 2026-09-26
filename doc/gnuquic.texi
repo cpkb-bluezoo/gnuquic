@@ -738,6 +738,15 @@ its versions the server lists: new destination ID, Initial keys and
 handshake.  If there is none the connection ends with
 @code{GQ_QERR_VERSION_NEGOTIATION} and the closed event.
 
+@heading QUIC version 2
+Version 2 (RFC 9369) differs from version 1 in four places only, all in
+@file{packet.c} and @file{protect.c}: the version number, the Initial
+salt, the HKDF label prefix (@samp{quicv2}) for packet, header protection
+and key update keys, the long header packet type bits, and the Retry
+integrity key and nonce.  Everything else is shared, so a connection
+carries its version and consults it at those points.  Defaults follow
+Gumdrop and Hopf: with nothing configured an endpoint lists v2 then v1.
+
 @heading Compatible: RFC 9368
 Every connection sends the @code{version_information} transport
 parameter: the version in use and the versions available.  QUIC v1 and v2
@@ -747,6 +756,21 @@ that version, keeping the handshake and the connection.  The client
 switches on the first Initial it can decrypt under the new version's
 keys; the server keeps accepting the client's Initial packets in the old
 version until the client has switched.
+
+A client starts in the oldest version it lists (the one a server is most
+likely to parse, RFC 9368 section 2.5) and offers the compatible others
+in its preference order; the server takes the client's most preferred
+version that it also lists.  Two endpoints with default configuration
+therefore start in v1 and finish in v2.
+
+Session tickets are bound to the version (RFC 9369 section 5).  A server
+serves version 1 with the ticket key ring it was given and derives a
+separate ring for version 2, so a ticket issued under one version fails
+to open under the other and the handshake falls back to a full one.  The
+server engine reads the client's transport parameters before it reads
+tickets, so a compatible switch selects the right ring in time.  A
+client should offer a stored session only on a connection that starts in
+the version that issued it; the ticket event reports that version.
 
 Downgrade protection: a client checks that the server's chosen version is
 the one in use, that a compatible switch came with the parameter, and,
@@ -758,9 +782,11 @@ checks that the client's chosen version is the version of its first
 Initial.
 
 Only QUIC v1 and v2 are implemented, so compatible negotiation exists
-only between them.  Version 2 has been tested against itself and against
-the RFC 9369 vectors; none of the peers available for interop
-(quiche, OpenSSL) speaks it.
+only between them; because they are compatible, a forged Version
+Negotiation packet that hides v2 is undone by the server moving the
+restarted connection back to the client's preferred version.  Version 2
+has been tested against itself and against the RFC 9369 vectors; none of
+the peers available for interop (quiche, OpenSSL) speaks it.
 
 @node Roadmap
 @chapter Roadmap

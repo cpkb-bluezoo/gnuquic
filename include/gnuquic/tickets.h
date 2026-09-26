@@ -85,6 +85,15 @@ int gq_ticket_keys_rotate (gq_ticket_keys *keys);
 int gq_ticket_keys_add (gq_ticket_keys *keys,
                         const uint8_t key[GQ_TICKET_KEY_LEN], int active);
 
+/* Make a ring whose keys are derived from those of PARENT (same layout,
+   same active key) under LABEL.  Tickets sealed by the derived ring do not
+   open under the parent or under a ring derived with another label, and
+   vice versa.  QUIC uses this to bind tickets to the QUIC version
+   (RFC 9369 section 5).  The derived ring is a snapshot: derive again
+   after the parent rotates.  */
+int gq_ticket_keys_derive (const gq_ticket_keys *parent, const char *label,
+                           gq_ticket_keys **out);
+
 /* Encrypt STATE into OUT (CAP bytes); the size is stored in *OUT_LEN.  */
 int gq_ticket_seal (const gq_ticket_keys *keys, const gq_session_state *state,
                     uint8_t *out, size_t cap, size_t *out_len);

@@ -300,9 +300,22 @@ local_params (gq_conn *c, gq_transport_params *tp)
   tp->initial_source_connection_id = c->scid_first;
   gq_tp_set_present (tp, GQ_TP_INITIAL_SOURCE_CONNECTION_ID);
   tp->chosen_version = c->version;
-  memcpy (tp->available_versions, g->versions,
-          g->n_versions * sizeof g->versions[0]);
-  tp->n_available_versions = g->n_versions;
+  {
+    /* Those compatible with the version in use, in our order; always
+       including it (RFC 9368 section 3).  */
+    size_t i, n = 0;
+    int saw = 0;
+
+    for (i = 0; i < g->n_versions; i++)
+      if (conn_version_compatible (c->version, g->versions[i]))
+        {
+          tp->available_versions[n++] = g->versions[i];
+          saw |= g->versions[i] == c->version;
+        }
+    if (!saw && n < GQ_TP_MAX_VERSIONS)
+      tp->available_versions[n++] = c->version;
+    tp->n_available_versions = n;
+  }
   gq_tp_set_present (tp, GQ_TP_VERSION_INFORMATION);
   if (g->disable_active_migration)
     gq_tp_set_present (tp, GQ_TP_DISABLE_ACTIVE_MIGRATION);
@@ -395,6 +408,26 @@ sink_secret (void *user, const gq_tls_secret *s)
   return 0;
 }
 
+/* Server: select the ticket ring bound to the version in use: tickets
+   issued under one QUIC version are not valid under the other (RFC 9369
+   section 5).  Version 1 keeps the caller's ring, so tickets issued
+   before versions existed still resume.  */
+static void
+apply_ticket_keys (gq_conn *c)
+{
+  if (c->ticket_base == NULL || c->tls == NULL)
+    return;
+  if (c->version != GQ_VERSION_2)
+    {
+      gq_tls_server_set_ticket_keys (c->tls, c->ticket_base);
+      return;
+    }
+  if (c->ticket_v2 == NULL)
+    gq_ticket_keys_derive (c->ticket_base, "quic version 2", &c->ticket_v2);
+  /* Without a derived ring, no tickets: a full handshake is always safe.  */
+  gq_tls_server_set_ticket_keys (c->tls, c->ticket_v2);
+}
+
 /* Server: switch to VERSION, a compatible version preferred over the one
    the client started with (RFC 9368 section 4).  */
 static int
@@ -434,22 +467,22 @@ negotiate_version (gq_conn *c)
         return GQ_OK;		/* A client that knows only one version.  */
       if (p->chosen_version != c->orig_version)
         return GQ_ERR_PROTOCOL;
-      for (i = 0; i < c->cfg.n_versions && !pick; i++)
+      /* The client's most preferred version that we also list and that
+         the one it started with is compatible with.  */
+      for (j = 0; j < p->n_available_versions && !pick; j++)
         {
-          uint32_t v = c->cfg.versions[i];
+          uint32_t v = p->available_versions[j];
 
-          if (!gq_version_supported (v)
-              || !conn_version_compatible (c->orig_version, v))
-            continue;
-          if (v == p->chosen_version)
+          if (gq_version_supported (v) && conn_version_listed (c, v)
+              && conn_version_compatible (c->orig_version, v))
             pick = v;
-          for (j = 0; j < p->n_available_versions; j++)
-            if (p->available_versions[j] == v)
-              pick = v;
         }
       if (pick && pick != c->version)
-        return switch_server_version (c, pick) == GQ_OK ? GQ_OK
-                                                        : GQ_ERR_PROTOCOL;
+        {
+          if (switch_server_version (c, pick) != GQ_OK)
+            return GQ_ERR_PROTOCOL;
+          apply_ticket_keys (c);
+        }
       return GQ_OK;
     }
   if (has)
@@ -474,7 +507,7 @@ negotiate_version (gq_conn *c)
             return GQ_ERR_PROTOCOL;
         }
     }
-  else if (c->switched)
+  else if (c->switched || c->vn_received)
     return GQ_ERR_PROTOCOL;
   return GQ_OK;
 }
@@ -527,7 +560,7 @@ sink_ticket (void *user, const gq_tls_ticket *t)
   gq_conn *c = user;
 
   if (c->ev.ticket)
-    c->ev.ticket (c->ev.user, t);
+    c->ev.ticket (c->ev.user, t, c->version);
   return 0;
 }
 
@@ -558,8 +591,6 @@ make_sink (gq_conn *c, gq_tls_sink *k)
 static void
 fill_defaults (gq_conn_config *g)
 {
-  if (g->version == 0)
-    g->version = GQ_VERSION_1;
   if (g->idle_timeout_ms == 0)
     g->idle_timeout_ms = DEFAULT_IDLE_MS;
   if (g->initial_max_data == 0)
@@ -576,11 +607,30 @@ fill_defaults (gq_conn_config *g)
     g->max_udp_payload = 1200;
   if (g->n_versions == 0)
     {
-      g->versions[0] = g->version;
-      g->n_versions = 1;
+      if (g->version)
+        {
+          g->versions[0] = g->version;
+          g->n_versions = 1;
+        }
+      else
+        {
+          g->versions[0] = GQ_VERSION_2;
+          g->versions[1] = GQ_VERSION_1;
+          g->n_versions = 2;
+        }
     }
   if (g->n_versions > GQ_TP_MAX_VERSIONS)
     g->n_versions = GQ_TP_MAX_VERSIONS;
+  if (g->version == 0)
+    {
+      /* The oldest listed: v1 if it is there.  */
+      size_t i;
+
+      g->version = g->versions[0];
+      for (i = 0; i < g->n_versions; i++)
+        if (g->versions[i] == GQ_VERSION_1)
+          g->version = GQ_VERSION_1;
+    }
   if (g->max_udp_payload > 2048)
     g->max_udp_payload = 2048;
   if (g->max_udp_payload < 1200)
@@ -875,9 +925,11 @@ conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
   c->stls.transport_params = c->tp_buf;
   c->stls.transport_params_len = c->tp_len;
   make_sink (c, &sink);
+  c->ticket_base = c->stls.ticket_keys;
   r = gq_tls_server_new (&c->tls, &c->stls, &sink);
   if (r != GQ_OK)
     return r;
+  apply_ticket_keys (c);
   c->got_first_initial = 1;
   return GQ_OK;
 }
@@ -890,6 +942,7 @@ gq_conn_free (gq_conn *c)
   if (c == NULL)
     return;
   gq_tls_free (c->tls);
+  gq_ticket_keys_free (c->ticket_v2);
   for (i = 0; i < N_SPACES; i++)
     {
       space *s = &c->sp[i];
