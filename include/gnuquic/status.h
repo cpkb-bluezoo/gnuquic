@@ -48,7 +48,9 @@ enum gq_status
   GQ_ERR_CERT = -9,		/* Certificate rejected (see gq_trust).  */
   GQ_ERR_UNAVAILABLE = -10,	/* Feature not compiled in.  */
   GQ_ERR_PROTOCOL = -11,	/* Well-formed but illegal (illegal_parameter).  */
-  GQ_ERR_TIMEOUT = -12		/* Retransmissions exhausted (DTLS).  */
+  GQ_ERR_TIMEOUT = -12,		/* Retransmissions exhausted (DTLS).  */
+  GQ_ERR_FLOW = -13,		/* QUIC: flow control limit exceeded.  */
+  GQ_ERR_FINAL_SIZE = -14	/* QUIC: stream final size violated.  */
 };
 
 /* Return a static, untranslated description of STATUS.  */

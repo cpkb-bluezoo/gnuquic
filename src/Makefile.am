@@ -21,6 +21,7 @@ lib_LTLIBRARIES = libgnuquic.la
 libgnuquic_la_SOURCES = \
   crypto.c \
   dtls.c \
+  conn_int.h \
   dtls_int.h \
   dtls12.c \
   dtls12cookie.c \
@@ -35,6 +36,13 @@ libgnuquic_la_SOURCES = \
   packet.c \
   policy.c \
   protect.c \
+  ranges.c \
+  conn.c \
+  conn_loss.c \
+  conn_recv.c \
+  conn_send.c \
+  conn_stream.c \
+  stream.c \
   record.c \
   record12.c \
   replay.c \
@@ -81,6 +89,9 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/packet.h \
   $(top_srcdir)/include/gnuquic/policy.h \
   $(top_srcdir)/include/gnuquic/protect.h \
+  $(top_srcdir)/include/gnuquic/conn.h \
+  $(top_srcdir)/include/gnuquic/ranges.h \
+  $(top_srcdir)/include/gnuquic/stream.h \
   $(top_srcdir)/include/gnuquic/record.h \
   $(top_srcdir)/include/gnuquic/record12.h \
   $(top_srcdir)/include/gnuquic/replay.h \

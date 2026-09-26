@@ -3,6 +3,12 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** QUIC connections (conn.h) and streams (stream.h, ranges.h): the
+handshake, packet number spaces, ACKs, RTT estimation, loss detection and
+probe timeouts (RFC 9002 without congestion control), stream and
+connection flow control, connection IDs, key update, idle timeout,
+connection close and stateless reset; tested against quiche in both
+directions, with loss.
 ** DTLS 1.2 (dtls12.h, dtls12cookie.h): the TLS 1.2 profile over datagrams,
 with whole-flight retransmission and a stateless HelloVerifyRequest;
 tested against OpenSSL, GnuTLS and wolfSSL.

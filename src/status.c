@@ -43,6 +43,8 @@ gq_strerror (int status)
     case GQ_ERR_UNAVAILABLE:	return _("feature not compiled in");
     case GQ_ERR_PROTOCOL:	return _("protocol violation");
     case GQ_ERR_TIMEOUT:	return _("peer stopped answering");
+    case GQ_ERR_FLOW:		return _("flow control limit exceeded");
+    case GQ_ERR_FINAL_SIZE:	return _("stream final size violated");
     default:			return _("unknown status");
     }
 }
