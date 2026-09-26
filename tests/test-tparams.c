@@ -22,6 +22,7 @@
 
 #include <gnuquic/status.h>
 #include <gnuquic/tparams.h>
+#include <gnuquic/packet.h>
 
 #include "tst-util.h"
 
@@ -179,11 +180,59 @@ test_rejects (void)
             GQ_ERR_ENCODING);
 }
 
+static void
+test_version_information (void)
+{
+  gq_transport_params tp, back;
+  uint8_t buf[128];
+  size_t n, i;
+  /* Chosen 0x6b3343cf, available: v2, v1.  */
+  static const uint8_t wire[] = { 0x11, 12, 0x6b, 0x33, 0x43, 0xcf, 0x6b,
+                                  0x33, 0x43, 0xcf, 0, 0, 0, 1 };
+
+  gq_tp_defaults (&tp);
+  tp.chosen_version = GQ_VERSION_2;
+  tp.available_versions[0] = GQ_VERSION_2;
+  tp.available_versions[1] = GQ_VERSION_1;
+  tp.n_available_versions = 2;
+  gq_tp_set_present (&tp, GQ_TP_VERSION_INFORMATION);
+  CHECK_EQ (gq_tp_encode (&tp, GQ_ROLE_CLIENT, buf, sizeof buf, &n), GQ_OK);
+  CHECK (n == sizeof wire && !memcmp (buf, wire, n));
+  CHECK_EQ (gq_tp_decode (buf, n, GQ_ROLE_SERVER, &back), GQ_OK);
+  CHECK (gq_tp_has (&back, GQ_TP_VERSION_INFORMATION));
+  CHECK (back.chosen_version == GQ_VERSION_2 && back.n_available_versions == 2);
+  CHECK (back.available_versions[1] == GQ_VERSION_1);
+  /* Either role may send it; a zero chosen version or a ragged length is
+     refused, and so is a duplicate.  */
+  CHECK_EQ (gq_tp_decode (buf, n, GQ_ROLE_CLIENT, &back), GQ_OK);
+  for (i = 1; i < 4; i++)
+    {
+      uint8_t bad[32];
+
+      memcpy (bad, wire, sizeof wire);
+      bad[1] = (uint8_t) (12 - i);
+      CHECK_EQ (gq_tp_decode (bad, sizeof wire - i, GQ_ROLE_CLIENT, &back),
+                GQ_ERR_ENCODING);
+    }
+  {
+    static const uint8_t zero[] = { 0x11, 4, 0, 0, 0, 0 };
+    uint8_t dup[32];
+
+    CHECK_EQ (gq_tp_decode (zero, sizeof zero, GQ_ROLE_CLIENT, &back),
+              GQ_ERR_ENCODING);
+    memcpy (dup, wire, sizeof wire);
+    memcpy (dup + sizeof wire, wire, sizeof wire);
+    CHECK_EQ (gq_tp_decode (dup, 2 * sizeof wire, GQ_ROLE_CLIENT, &back),
+              GQ_ERR_ENCODING);
+  }
+}
+
 int
 main (void)
 {
   test_rfc_vector ();
   test_server_roundtrip ();
   test_rejects ();
+  test_version_information ();
   TST_DONE ();
 }

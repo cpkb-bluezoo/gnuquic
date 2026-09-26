@@ -44,8 +44,11 @@
    Congestion control is NewReno as in RFC 9002 section 7, without
    pacing or ECN.
 
-   Not done here (later steps): address validation
-   tokens and Retry, version negotiation handling, 0-RTT, path validation
+   Version negotiation is both RFC 9000 section 6 (a client restarts after
+   a Version Negotiation packet) and RFC 9368 (compatible negotiation
+   between v1 and v2 during the handshake, with downgrade protection).
+
+   Not done here (later steps): 0-RTT, path validation
    and migration, DATAGRAM frames, and the endpoint layer that routes
    datagrams to connections.  */
 
@@ -84,6 +87,7 @@ enum gq_transport_error
   GQ_QERR_KEY_UPDATE = 0xe,
   GQ_QERR_AEAD_LIMIT = 0xf,
   GQ_QERR_NO_VIABLE_PATH = 0x10,
+  GQ_QERR_VERSION_NEGOTIATION = 0x11,	/* RFC 9368.  */
   GQ_QERR_CRYPTO_BASE = 0x100	/* Plus the TLS alert.  */
 };
 
@@ -144,7 +148,18 @@ typedef struct gq_conn_events
 /* Zero means the default in every field.  */
 typedef struct gq_conn_config
 {
-  uint32_t version;			/* GQ_VERSION_1 (default) or 2.  */
+  uint32_t version;			/* GQ_VERSION_1 (default) or 2.  A
+					   client's first flight; a server's
+					   version when versions is empty.  */
+  /* Versions this endpoint is willing to use, most preferred first (RFC
+     9368; at most GQ_TP_MAX_VERSIONS).  Empty: just VERSION.  A server
+     serves any Initial whose version is listed and may switch to a
+     preferred compatible version (v1 and v2 are compatible); a client
+     offers them, restarts after a Version Negotiation packet with the
+     first listed version the server has, and accepts a compatible switch
+     to a listed version.  */
+  uint32_t versions[GQ_TP_MAX_VERSIONS];
+  size_t n_versions;
   uint64_t idle_timeout_ms;		/* 0: 30000.  */
   uint64_t initial_max_data;		/* 0: 1 MiB.  */
   uint64_t initial_max_stream_data;	/* Each stream type; 0: 256 KiB.  */

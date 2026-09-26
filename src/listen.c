@@ -55,17 +55,29 @@ gq_quic_admit (const gq_token_keys *keys, const gq_admit_config *cfg,
   if (len < GQ_MIN_INITIAL_DATAGRAM || !(data[0] & 0x80))
     return GQ_ADMIT_DROP;
   r = gq_long_header_parse (data, len, &h);
+  if (r == GQ_OK && cfg && cfg->n_versions)
+    {
+      size_t i;
+
+      for (i = 0; i < cfg->n_versions; i++)
+        if (cfg->versions[i] == h.version)
+          break;
+      if (i == cfg->n_versions && h.type != GQ_PKT_VERSION_NEGOTIATION)
+        r = GQ_ERR_UNSUPPORTED;	/* Speaks it, but we are not offering it.  */
+    }
   if (r == GQ_ERR_UNSUPPORTED)
     {
       /* Never answer a Version Negotiation packet with another.  */
-      static const uint32_t ours[2] = { GQ_VERSION_1, GQ_VERSION_2 };
+      static const uint32_t both[2] = { GQ_VERSION_1, GQ_VERSION_2 };
+      const uint32_t *ours = cfg && cfg->n_versions ? cfg->versions : both;
+      size_t n_ours = cfg && cfg->n_versions ? cfg->n_versions : 2;
       uint8_t bits = 0;
 
       if (h.version == GQ_VERSION_NEGOTIATION)
         return GQ_ADMIT_DROP;
       gq_random (&bits, 1);
       if (gq_vn_build (h.scid.data, h.scid.len, h.dcid.data, h.dcid.len, ours,
-                       2, bits, out, cap, reply_len) != GQ_OK)
+                       n_ours, bits, out, cap, reply_len) != GQ_OK)
         return GQ_ADMIT_DROP;
       return GQ_ADMIT_REPLY;
     }

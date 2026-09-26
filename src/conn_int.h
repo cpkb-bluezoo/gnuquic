@@ -138,6 +138,11 @@ struct gq_conn
   gq_conn_config cfg;
   gq_conn_events ev;
   uint32_t version;
+  uint32_t orig_version;	/* Version of the first flight.  */
+  uint8_t switched;		/* A compatible version switch happened.  */
+  uint8_t vn_received;		/* Restarted after Version Negotiation.  */
+  gq_packet_keys orig_rk;	/* Server: Initial keys of orig_version.  */
+  uint8_t have_orig_rk;
 
   gq_tls *tls;
   gq_tls_config ctls;		/* Copies of the caller's configuration:  */
@@ -253,6 +258,10 @@ void conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining);
 int conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
                        const uint8_t *client_scid, size_t client_scid_len);
 void conn_recompute_idle (gq_conn *c, uint64_t now);
+int conn_client_restart (gq_conn *c, uint32_t version);
+int conn_version_compatible (uint32_t a, uint32_t b);
+int conn_version_listed (const gq_conn *c, uint32_t v);
+void conn_abandon (gq_conn *c, uint64_t error, const char *reason);
 uint64_t conn_pto_base (const gq_conn *c, int sp);
 int conn_new_lcid (gq_conn *c, int announced);
 uint64_t conn_wall_seconds (const gq_conn *c);

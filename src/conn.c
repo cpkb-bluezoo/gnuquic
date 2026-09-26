@@ -32,6 +32,8 @@
 #define DEFAULT_STREAMS 100
 #define CRYPTO_BUFFER (1u << 17)
 
+static void encode_params (gq_conn *c);
+
 static uint64_t
 umax (uint64_t a, uint64_t b)
 {
@@ -254,6 +256,25 @@ conn_notify_connected (gq_conn *c, const gq_tls_info *info)
 
 /* ---- Transport parameters ---- */
 
+int
+conn_version_compatible (uint32_t a, uint32_t b)
+{
+  return a == b
+         || ((a == GQ_VERSION_1 || a == GQ_VERSION_2)
+             && (b == GQ_VERSION_1 || b == GQ_VERSION_2));
+}
+
+int
+conn_version_listed (const gq_conn *c, uint32_t v)
+{
+  size_t i;
+
+  for (i = 0; i < c->cfg.n_versions; i++)
+    if (c->cfg.versions[i] == v)
+      return 1;
+  return 0;
+}
+
 static void
 local_params (gq_conn *c, gq_transport_params *tp)
 {
@@ -278,6 +299,11 @@ local_params (gq_conn *c, gq_transport_params *tp)
   gq_tp_set_present (tp, GQ_TP_ACTIVE_CONNECTION_ID_LIMIT);
   tp->initial_source_connection_id = c->scid_first;
   gq_tp_set_present (tp, GQ_TP_INITIAL_SOURCE_CONNECTION_ID);
+  tp->chosen_version = c->version;
+  memcpy (tp->available_versions, g->versions,
+          g->n_versions * sizeof g->versions[0]);
+  tp->n_available_versions = g->n_versions;
+  gq_tp_set_present (tp, GQ_TP_VERSION_INFORMATION);
   if (g->disable_active_migration)
     gq_tp_set_present (tp, GQ_TP_DISABLE_ACTIVE_MIGRATION);
   if (c->role == GQ_ROLE_SERVER)
@@ -369,6 +395,90 @@ sink_secret (void *user, const gq_tls_secret *s)
   return 0;
 }
 
+/* Server: switch to VERSION, a compatible version preferred over the one
+   the client started with (RFC 9368 section 4).  */
+static int
+switch_server_version (gq_conn *c, uint32_t version)
+{
+  gq_packet_keys ck, sk;
+  size_t before = c->tp_len;
+
+  if (gq_packet_keys_initial (version, c->initial_dcid.data,
+                              c->initial_dcid.len, &ck, &sk) != GQ_OK)
+    return GQ_ERR_CRYPTO;
+  c->orig_rk = c->sp[SP_INITIAL].rk;
+  c->have_orig_rk = 1;
+  c->sp[SP_INITIAL].rk = ck;
+  c->sp[SP_INITIAL].wk = sk;
+  c->version = version;
+  c->switched = 1;
+  /* The engine holds a pointer to these bytes; the length is unchanged.  */
+  encode_params (c);
+  return c->tp_len == before ? GQ_OK : GQ_ERR_INVAL;
+}
+
+/* RFC 9368 section 5: check the peer's version_information against what
+   happened, and (server) pick the version to use.  */
+static int
+negotiate_version (gq_conn *c)
+{
+  const gq_transport_params *p = &c->peer_tp;
+  int has = gq_tp_has (p, GQ_TP_VERSION_INFORMATION);
+  size_t i, j;
+
+  if (c->role == GQ_ROLE_SERVER)
+    {
+      uint32_t pick = 0;
+
+      if (!has)
+        return GQ_OK;		/* A client that knows only one version.  */
+      if (p->chosen_version != c->orig_version)
+        return GQ_ERR_PROTOCOL;
+      for (i = 0; i < c->cfg.n_versions && !pick; i++)
+        {
+          uint32_t v = c->cfg.versions[i];
+
+          if (!gq_version_supported (v)
+              || !conn_version_compatible (c->orig_version, v))
+            continue;
+          if (v == p->chosen_version)
+            pick = v;
+          for (j = 0; j < p->n_available_versions; j++)
+            if (p->available_versions[j] == v)
+              pick = v;
+        }
+      if (pick && pick != c->version)
+        return switch_server_version (c, pick) == GQ_OK ? GQ_OK
+                                                        : GQ_ERR_PROTOCOL;
+      return GQ_OK;
+    }
+  if (has)
+    {
+      if (p->chosen_version != c->version)
+        return GQ_ERR_PROTOCOL;
+      if (c->vn_received)
+        {
+          /* It must be the version we would have picked from the server's
+             own list, or the Version Negotiation packet was forged.  */
+          uint32_t best = 0;
+
+          for (i = 0; i < c->cfg.n_versions && !best; i++)
+            for (j = 0; j < p->n_available_versions; j++)
+              if (p->available_versions[j] == c->cfg.versions[i]
+                  && gq_version_supported (c->cfg.versions[i]))
+                {
+                  best = c->cfg.versions[i];
+                  break;
+                }
+          if (best != c->version)
+            return GQ_ERR_PROTOCOL;
+        }
+    }
+  else if (c->switched)
+    return GQ_ERR_PROTOCOL;
+  return GQ_OK;
+}
+
 static int
 sink_peer_params (void *user, const uint8_t *data, size_t len)
 {
@@ -384,6 +494,11 @@ sink_peer_params (void *user, const uint8_t *data, size_t len)
   if (r != GQ_OK)
     {
       conn_fail (c, GQ_QERR_TRANSPORT_PARAMETER, "bad transport parameters");
+      return 1;
+    }
+  if (negotiate_version (c) != GQ_OK)
+    {
+      conn_fail (c, GQ_QERR_VERSION_NEGOTIATION, "version negotiation failed");
       return 1;
     }
   return 0;
@@ -459,6 +574,13 @@ fill_defaults (gq_conn_config *g)
     g->send_buffer = 256u << 10;
   if (g->max_udp_payload == 0)
     g->max_udp_payload = 1200;
+  if (g->n_versions == 0)
+    {
+      g->versions[0] = g->version;
+      g->n_versions = 1;
+    }
+  if (g->n_versions > GQ_TP_MAX_VERSIONS)
+    g->n_versions = GQ_TP_MAX_VERSIONS;
   if (g->max_udp_payload > 2048)
     g->max_udp_payload = 2048;
   if (g->max_udp_payload < 1200)
@@ -471,6 +593,15 @@ fill_defaults (gq_conn_config *g)
     g->active_cid_limit = 4;
   if (g->active_cid_limit > MAX_LCID)
     g->active_cid_limit = MAX_LCID;
+}
+
+static void
+space_init (space *s)
+{
+  gq_ranges_init (&s->recv, 64);
+  gq_ranges_init (&s->acked_pns, 32);
+  gq_sstream_init (&s->cs, CRYPTO_BUFFER, UINT64_MAX);
+  gq_rstream_init (&s->cr, CRYPTO_BUFFER);
 }
 
 static gq_conn *
@@ -489,7 +620,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
   fill_defaults (&c->cfg);
   if (events)
     c->ev = *events;
-  c->version = c->cfg.version;
+  c->version = c->orig_version = c->cfg.version;
   c->now = now;
   c->srtt = K_INITIAL_RTT;
   c->rttvar = K_INITIAL_RTT / 2;
@@ -503,12 +634,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
     = c->cfg.initial_max_streams_uni;
   for (i = 0; i < N_SPACES; i++)
     {
-      space *s = &c->sp[i];
-
-      gq_ranges_init (&s->recv, 64);
-      gq_ranges_init (&s->acked_pns, 32);
-      gq_sstream_init (&s->cs, CRYPTO_BUFFER, UINT64_MAX);
-      gq_rstream_init (&s->cr, CRYPTO_BUFFER);
+      space_init (&c->sp[i]);
     }
   cc_init (c);
   conn_recompute_idle (c, now);
@@ -533,14 +659,54 @@ encode_params (gq_conn *c)
   gq_tp_encode (&tp, c->role, c->tp_buf, sizeof c->tp_buf, &c->tp_len);
 }
 
+/* Client: pick the first destination ID, derive the Initial keys, and
+   start the TLS handshake.  Also the restart after Version Negotiation.  */
+static int
+client_setup (gq_conn *c, int use_token)
+{
+  gq_tls_sink sink;
+  gq_packet_keys ck, sk;
+  int r;
+
+  /* Random first destination connection ID, at least 8 bytes.  */
+  c->odcid.len = 8;
+  if (gq_random (c->odcid.data, c->odcid.len) != GQ_OK)
+    return GQ_ERR_CRYPTO;
+  c->dcid = c->odcid;
+  c->initial_dcid = c->odcid;
+  c->dcid_set = 1;
+  c->p[0].cid = c->odcid;
+  c->token_len = 0;
+  if (use_token && c->cfg.token && c->cfg.token_len
+      && c->cfg.token_len <= sizeof c->token)
+    {
+      memcpy (c->token, c->cfg.token, c->cfg.token_len);
+      c->token_len = c->cfg.token_len;
+    }
+  r = gq_packet_keys_initial (c->version, c->odcid.data, c->odcid.len, &ck,
+                              &sk);
+  if (r != GQ_OK)
+    return r;
+  c->sp[SP_INITIAL].wk = ck;
+  c->sp[SP_INITIAL].rk = sk;
+  c->sp[SP_INITIAL].have_wk = c->sp[SP_INITIAL].have_rk = 1;
+  encode_params (c);
+  c->ctls.quic = 1;
+  c->ctls.transport_params = c->tp_buf;
+  c->ctls.transport_params_len = c->tp_len;
+  make_sink (c, &sink);
+  r = gq_tls_client_new (&c->tls, &c->ctls, &sink);
+  if (r == GQ_OK)
+    r = gq_tls_start (c->tls);
+  return r;
+}
+
 int
 gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
                     const gq_tls_config *tls, const gq_conn_events *events,
                     uint64_t now_us)
 {
   gq_conn *c;
-  gq_tls_sink sink;
-  gq_packet_keys ck, sk;
   int r;
 
   if (out == NULL || tls == NULL || tls->n_alpn == 0)
@@ -554,41 +720,18 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
       gq_conn_free (c);
       return GQ_ERR_UNSUPPORTED;
     }
-  /* Random first destination connection ID, at least 8 bytes.  */
-  c->odcid.len = 8;
-  if (gq_random (c->odcid.data, c->odcid.len) != GQ_OK)
+  /* The version we start with is always among those we offer.  */
+  if (!conn_version_listed (c, c->version))
     {
-      gq_conn_free (c);
-      return GQ_ERR_CRYPTO;
+      if (c->cfg.n_versions == GQ_TP_MAX_VERSIONS)
+        c->cfg.n_versions--;
+      memmove (c->cfg.versions + 1, c->cfg.versions,
+               c->cfg.n_versions * sizeof c->cfg.versions[0]);
+      c->cfg.versions[0] = c->version;
+      c->cfg.n_versions++;
     }
-  c->dcid = c->odcid;
-  c->initial_dcid = c->odcid;
-  c->dcid_set = 1;
-  c->p[0].cid = c->odcid;
-  if (c->cfg.token && c->cfg.token_len && c->cfg.token_len <= sizeof c->token)
-    {
-      memcpy (c->token, c->cfg.token, c->cfg.token_len);
-      c->token_len = c->cfg.token_len;
-    }
-  r = gq_packet_keys_initial (c->version, c->odcid.data, c->odcid.len, &ck,
-                              &sk);
-  if (r != GQ_OK)
-    {
-      gq_conn_free (c);
-      return r;
-    }
-  c->sp[SP_INITIAL].wk = ck;
-  c->sp[SP_INITIAL].rk = sk;
-  c->sp[SP_INITIAL].have_wk = c->sp[SP_INITIAL].have_rk = 1;
-  encode_params (c);
   c->ctls = *tls;
-  c->ctls.quic = 1;
-  c->ctls.transport_params = c->tp_buf;
-  c->ctls.transport_params_len = c->tp_len;
-  make_sink (c, &sink);
-  r = gq_tls_client_new (&c->tls, &c->ctls, &sink);
-  if (r == GQ_OK)
-    r = gq_tls_start (c->tls);
+  r = client_setup (c, 1);
   if (r != GQ_OK)
     {
       gq_conn_free (c);
@@ -596,6 +739,63 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
     }
   *out = c;
   return GQ_OK;
+}
+
+/* A Version Negotiation packet named a version we prefer: start the
+   connection again with it (RFC 9000 section 6.2).  Nothing has been
+   received from the server yet, so all state is the first flight's.  */
+int
+conn_client_restart (gq_conn *c, uint32_t version)
+{
+  int i;
+
+  gq_tls_free (c->tls);
+  c->tls = NULL;
+  for (i = 0; i < N_SPACES; i++)
+    {
+      space *s = &c->sp[i];
+
+      sp_sent_clear (c, i);
+      free (s->sent);
+      gq_ranges_free (&s->recv);
+      gq_ranges_free (&s->acked_pns);
+      gq_sstream_free (&s->cs);
+      gq_rstream_free (&s->cr);
+      gq_packet_keys_wipe (&s->rk);
+      gq_packet_keys_wipe (&s->wk);
+      memset (s, 0, sizeof *s);
+      space_init (s);
+    }
+  c->version = c->orig_version = version;
+  c->vn_received = 1;
+  c->switched = 0;
+  c->retried = 0;
+  c->retry_scid.len = 0;
+  c->pto_count = 0;
+  c->have_peer_tp = 0;
+  c->bytes_in_flight = 0;
+  return client_setup (c, 0);
+}
+
+/* The connection cannot continue and there is nobody to tell.  */
+void
+conn_abandon (gq_conn *c, uint64_t error, const char *reason)
+{
+  gq_conn_close_info info;
+
+  memset (&info, 0, sizeof info);
+  info.source = GQ_CLOSE_LOCAL;
+  info.error = error;
+  info.reason = (const uint8_t *) reason;
+  info.reason_len = strlen (reason);
+  c->close_pending = 0;
+  c->state = GQ_CONN_DONE;
+  if (!c->closed_notified)
+    {
+      c->closed_notified = 1;
+      if (c->ev.closed)
+        c->ev.closed (c->ev.user, &info);
+    }
 }
 
 int

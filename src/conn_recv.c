@@ -503,6 +503,41 @@ recv_retry (gq_conn *c, const gq_long_header *h, const uint8_t *pkt, size_t len)
   return 1;
 }
 
+/* Client: a Version Negotiation packet (RFC 9000 section 6.2).  Genuine
+   ones echo our connection IDs and do not list the version we used.  */
+static int
+recv_vn (gq_conn *c, const gq_long_header *h)
+{
+  size_t i, j, n = gq_vn_count (h);
+  uint32_t pick = 0;
+
+  if (c->role != GQ_ROLE_CLIENT || c->got_peer_packet || c->vn_received
+      || c->retried || h->dcid.len != c->scid_first.len
+      || memcmp (h->dcid.data, c->scid_first.data, h->dcid.len)
+      || h->scid.len != c->initial_dcid.len
+      || memcmp (h->scid.data, c->initial_dcid.data, h->scid.len))
+    return 0;
+  for (i = 0; i < n; i++)
+    if (gq_vn_get (h, i) == c->version)
+      return 0;			/* Cannot be a real one.  */
+  for (i = 0; i < c->cfg.n_versions && !pick; i++)
+    for (j = 0; j < n; j++)
+      if (gq_vn_get (h, j) == c->cfg.versions[i]
+          && gq_version_supported (c->cfg.versions[i]))
+        {
+          pick = c->cfg.versions[i];
+          break;
+        }
+  if (pick == 0)
+    {
+      conn_abandon (c, GQ_QERR_VERSION_NEGOTIATION, "no common version");
+      return 1;
+    }
+  if (conn_client_restart (c, pick) != GQ_OK)
+    conn_abandon (c, GQ_QERR_INTERNAL, "cannot restart");
+  return 1;
+}
+
 /* Handle one long-header packet.  *USED is the number of bytes it took
    (0: stop, the rest of the datagram is unusable).  Returns 1 if a packet
    was processed.  */
@@ -512,21 +547,56 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
 {
   gq_long_header h;
   space *s;
-  int sp, r, ae;
+  int sp, r, ae, adopt = 0;
   uint64_t pn;
   size_t poff, plen;
+  gq_packet_keys ck, sk;
+  const gq_packet_keys *rk = NULL;
 
   *used = 0;
   r = gq_long_header_parse (pkt, rem, &h);
   if (r != GQ_OK)
     return 0;
   *used = h.packet_len;
+  if (h.type == GQ_PKT_VERSION_NEGOTIATION)
+    return recv_vn (c, &h);
+  if (c->role == GQ_ROLE_SERVER && !c->got_first_initial
+      && h.version != c->version && h.type == GQ_PKT_INITIAL
+      && gq_version_supported (h.version) && conn_version_listed (c, h.version))
+    c->version = c->orig_version = h.version;	/* Serve what was asked.  */
   if (h.version != c->version)
-    return 0;
+    {
+      /* Only Initial packets may differ, and only during a compatible
+         version negotiation: a server still hears the client's first
+         version until the client has switched, and a client hears the
+         server's new one once.  */
+      if (h.type != GQ_PKT_INITIAL)
+        return 0;
+      if (c->role == GQ_ROLE_SERVER)
+        {
+          if (!c->switched || h.version != c->orig_version
+              || !c->have_orig_rk)
+            return 0;
+          rk = &c->orig_rk;
+        }
+      else if (c->switched || c->sp[SP_HANDSHAKE].have_rk
+               || !conn_version_listed (c, h.version)
+               || !conn_version_compatible (c->version, h.version)
+               || !gq_version_supported (h.version)
+               || gq_packet_keys_initial (h.version, c->initial_dcid.data,
+                                          c->initial_dcid.len, &ck, &sk)
+                  != GQ_OK)
+        return 0;
+      else
+        {
+          rk = &sk;
+          adopt = 1;
+        }
+    }
   if (h.type == GQ_PKT_RETRY)
     return recv_retry (c, &h, pkt, h.packet_len);
   if (h.type != GQ_PKT_INITIAL && h.type != GQ_PKT_HANDSHAKE)
-    return 0;			/* 0-RTT, Version Negotiation.  */
+    return 0;			/* 0-RTT.  */
   sp = h.type == GQ_PKT_INITIAL ? SP_INITIAL : SP_HANDSHAKE;
   if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
     {
@@ -553,7 +623,9 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       && (h.scid.len != c->dcid.len
           || memcmp (h.scid.data, c->dcid.data, h.scid.len)))
     return 0;
-  r = gq_packet_open (&s->rk, s->have_recv, s->largest_recv, pkt, h.packet_len,
+  if (rk == NULL)
+    rk = &s->rk;
+  r = gq_packet_open (rk, s->have_recv, s->largest_recv, pkt, h.packet_len,
                       h.pn_offset, &pn, &poff, &plen);
   if (r == GQ_ERR_ENCODING)
     {
@@ -564,6 +636,16 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     return 0;
   if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
     return 1;			/* Duplicate.  */
+  if (adopt)
+    {
+      /* The server moved us to another compatible version: everything
+         from here on uses it.  */
+      c->orig_version = c->version;
+      c->version = h.version;
+      c->switched = 1;
+      s->rk = sk;
+      s->wk = ck;
+    }
   if (c->role == GQ_ROLE_CLIENT && !c->got_peer_packet)
     {
       /* The server picked its own connection ID: use it from now on.  */

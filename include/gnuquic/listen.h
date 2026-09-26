@@ -54,6 +54,10 @@ typedef struct gq_admit_config
   uint32_t new_token_lifetime_s;	/* 0: one day.  */
   size_t retry_cid_len;		/* Length of the ID chosen in a Retry;
 				   0: 8.  */
+  /* Versions the server speaks, for Version Negotiation; an Initial in
+     any other version is answered with the list.  Empty: v1 and v2.  */
+  uint32_t versions[GQ_TP_MAX_VERSIONS];
+  size_t n_versions;
 } gq_admit_config;
 
 enum gq_admit_action
