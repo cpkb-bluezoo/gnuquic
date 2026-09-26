@@ -668,6 +668,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
   if (config)
     c->cfg = *config;
   fill_defaults (&c->cfg);
+  conn_path_init (c, &c->cfg.path);
   if (events)
     c->ev = *events;
   c->version = c->orig_version = c->cfg.version;
@@ -1004,28 +1005,61 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->congestion_events = c->congestion_events;
   st->pto_count = c->pto_count;
   st->key_updates = c->key_updates;
+  st->path_validations = c->path_validations;
+  st->path_failures = c->path_failures;
+  st->migrations = c->migrations;
+}
+
+int
+gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
+                   uint8_t *data, size_t len)
+{
+  int r;
+
+  c->now = now_us;
+  if (c->state == GQ_CONN_DONE || c->state == GQ_CONN_DRAINING)
+    return GQ_OK;
+  conn_path_rx_begin (c, from);
+  if (!conn_path_accept_rx (c))
+    {
+      conn_path_rx_end (c);
+      return GQ_OK;
+    }
+  r = conn_receive_datagram (c, now_us, data, len);
+  conn_path_rx_end (c);
+  return r;
 }
 
 int
 gq_conn_recv (gq_conn *c, uint64_t now_us, uint8_t *data, size_t len)
 {
+  return gq_conn_recv_path (c, now_us, NULL, data, len);
+}
+
+int
+gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
+                   size_t *len, gq_path *to)
+{
+  int r;
+
+  *len = 0;
   c->now = now_us;
+  c->tx_path = c->cur_path;
   if (c->state == GQ_CONN_DONE || c->state == GQ_CONN_DRAINING)
     return GQ_OK;
-  return conn_receive_datagram (c, now_us, data, len);
+  if (cap < conn_max_datagram (c))
+    return GQ_ERR_BUFSIZE;
+  r = conn_build_datagram (c, now_us, out, cap, len);
+  if (to)
+    *to = c->paths[c->tx_path].p;
+  return r;
 }
 
 int
 gq_conn_send (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
               size_t *len)
 {
-  *len = 0;
-  c->now = now_us;
-  if (c->state == GQ_CONN_DONE || c->state == GQ_CONN_DRAINING)
-    return GQ_OK;
-  if (cap < conn_max_datagram (c))
-    return GQ_ERR_BUFSIZE;
-  return conn_build_datagram (c, now_us, out, cap, len);
+  return gq_conn_send_path (c, now_us, out, cap, len, NULL);
 }
 
 uint64_t
@@ -1044,6 +1078,7 @@ gq_conn_timeout (const gq_conn *c)
     if (!c->sp[i].discarded)
       EARLIER (c->sp[i].ack_deadline);
   EARLIER (conn_loss_deadline (c));
+  EARLIER (conn_path_deadline (c));
 #undef EARLIER
   return t;
 }
@@ -1085,4 +1120,5 @@ gq_conn_on_timeout (gq_conn *c, uint64_t now_us)
         }
     }
   on_loss_timeout (c, now_us);
+  conn_path_on_timeout (c, now_us);
 }

@@ -3,6 +3,13 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** Path validation and connection migration (RFC 9000 sections 8.2 and 9):
+gq_conn_recv_path and gq_conn_send_path carry opaque addresses; a server
+follows a peer that moves (validating the new path, limiting what it sends
+there to three times what arrived, falling back if validation fails), a
+client can probe paths and migrate (gq_conn_probe_path, gq_conn_migrate),
+and each path uses its own peer connection ID.  Tested in a simulated NAT
+and against quiche's migration in both directions.
 ** QUIC version 2 (RFC 9369) is now the default preference: endpoints
 list v2 then v1, a client starts in the oldest listed version and the
 server follows the client's order (RFC 9368), so two endpoints of this

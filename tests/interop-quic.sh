@@ -86,13 +86,17 @@ ours_server ()
   pid=$!
   PIDS="$PIDS $pid"
   sleep 0.5
-  "$QDIR/quiche-client" --http-version HTTP/0.9 --no-verify \
+  case $name in *migrat*) qargs="--enable-active-migration --perform-migration --max-active-cids 4" ;; *) qargs= ;; esac
+  "$QDIR/quiche-client" --http-version HTTP/0.9 --no-verify $qargs \
     --idle-timeout 20000 --dump-responses "out-$name" \
     https://127.0.0.1:$port/small https://127.0.0.1:$port/hello \
     https://127.0.0.1:$port/big > "cli-$name.log" 2>&1
   rc=$?
   kill $pid 2>/dev/null
   check_files "out-$name" small hello big || rc=1
+  case $name in *migrat*)
+    grep -q MIGRATED "srv-$name.log" || rc=1 ;;
+  esac
   report $rc "$name"
 }
 
@@ -106,7 +110,8 @@ ours_client ()
   case $name in *retry*) noretry= ;; *) noretry=--no-retry ;; esac
   "$QDIR/quiche-server" --listen 127.0.0.1:$port --cert ec.pem --key ec.key \
     --root root --http-version HTTP/0.9 $noretry \
-    --idle-timeout 20000 > "qsrv-$name.log" 2>&1 &
+    --idle-timeout 20000 --enable-active-migration --max-active-cids 4 \
+    > "qsrv-$name.log" 2>&1 &
   pid=$!
   PIDS="$PIDS $pid"
   sleep 0.5
@@ -115,17 +120,22 @@ ours_client ()
   rc=$?
   kill $pid 2>/dev/null
   check_files "out-$name" small hello big || rc=1
+  case $name in *migrat*)
+    grep -q MIGRATED "cli-$name.log" || rc=1 ;;
+  esac
   report $rc "$name"
 }
 
 ours_server plain
 ours_server loss --loss 20 --seed 3
 ours_server retry --retry
+ours_server migration
 ours_server retry-loss --retry --loss 15 --seed 4
 ours_client plain
 ours_client loss --loss 10 --seed 5
 ours_client key-update --key-update
 ours_client retry
+ours_client migration --migrate
 ours_client retry-loss --loss 10 --seed 6
 
 echo "$runs scenarios, $fails failed"

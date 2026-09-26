@@ -76,6 +76,8 @@ Pre-alpha.  What exists today:
   (conn also does Version Negotiation on the client and RFC 9368
            compatible negotiation between QUIC v1 and v2; v2 is preferred by
            default, and tickets are bound to the version)
+  (conn also does path validation, peer migration and client-initiated
+           migration over caller-supplied opaque addresses)
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle

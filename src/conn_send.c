@@ -42,6 +42,7 @@ typedef struct pk
   unsigned nsf;
   int ae;			/* Contains an ack-eliciting frame.  */
   int closing;
+  int challenge;		/* Carries a PATH_CHALLENGE.  */
   size_t hdr_est;		/* Header estimate used to size cap.  */
 } pk;
 
@@ -123,7 +124,9 @@ app_pending (gq_conn *c)
 {
   size_t i;
 
-  if (c->handshake_done_pending || c->new_token_pending || c->n_path_response || conn_update_wanted (c))
+  if (c->handshake_done_pending || c->new_token_pending
+      || c->paths[c->cur_path].n_resp || c->paths[c->cur_path].need_challenge
+      || conn_update_wanted (c))
     return 1;
   for (i = 0; i < MAX_LCID; i++)
     if (c->l[i].used && c->l[i].need_send)
@@ -408,15 +411,32 @@ add_app_frames (gq_conn *c, pk *p)
       else
         c->new_token_pending = 0;
     }
-  for (i = 0; i < c->n_path_response; i++)
-    if (room (p) >= 9)
+  {
+    pathinfo *cp = &c->paths[c->cur_path];
+    unsigned k;
+
+    for (k = 0; k < cp->n_resp; k++)
+      if (room (p) >= 9)
+        {
+          memset (&f, 0, sizeof f);
+          f.type = GQ_FRAME_PATH_RESPONSE;
+          memcpy (f.u.path_challenge.data, cp->resp[k], 8);
+          memset (&e, 0, sizeof e);
+          e.type = SF_PATH_RESPONSE;
+          add (p, &f, 1, &e);
+        }
+    cp->n_resp = 0;
+    if (cp->need_challenge && room (p) >= 9)
       {
         memset (&f, 0, sizeof f);
-        f.type = GQ_FRAME_PATH_RESPONSE;
-        memcpy (f.u.path_challenge.data, c->path_response[i], 8);
-        add (p, &f, 1, NULL);
+        f.type = GQ_FRAME_PATH_CHALLENGE;
+        conn_path_challenge_data (c, c->cur_path, f.u.path_challenge.data);
+        memset (&e, 0, sizeof e);
+        e.type = SF_PATH_CHALLENGE;
+        add (p, &f, 1, &e);
+        p->challenge = 1;
       }
-  c->n_path_response = 0;
+  }
   for (i = 0; i < MAX_LCID; i++)
     if (c->l[i].used && c->l[i].need_send && room (p) >= 40)
       {
@@ -571,6 +591,7 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
   p->nsf = 0;
   p->ae = 0;
   p->closing = 0;
+  p->challenge = 0;
   p->cap = budget - ov;
   p->hdr_est = ov;
   if (c->state == GQ_CONN_CLOSING)
@@ -655,69 +676,16 @@ seal (gq_conn *c, uint64_t now, pk *p, uint64_t pn, size_t pn_len, uint8_t *out,
   return r;
 }
 
-int
-conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
-                     size_t *len)
+/* Pad, protect and account for the N packets of one datagram bound for
+   path DEST (an index into the path table).  */
+static int
+finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
+                 const size_t *pnl, int n, int need_pad, size_t maxdg,
+                 int dest, uint8_t *out, size_t *len)
 {
-  size_t maxdg = conn_max_datagram (c), est = 0, total = 0;
-  static const int order[N_SPACES] = { SP_INITIAL, SP_HANDSHAKE, SP_APP };
-  pk *pks[N_SPACES];
-  uint64_t pns[N_SPACES];
-  size_t pnl[N_SPACES];
-  int n = 0, i, need_pad = 0, sent_handshake = 0, ae = 0, r = GQ_OK;
-  pk *storage;
+  size_t total = 0;
+  int i, ae = 0, sent_handshake = 0, r = GQ_OK;
 
-  *len = 0;
-  if (maxdg > cap)
-    maxdg = cap;
-  if (c->role == GQ_ROLE_SERVER && !c->peer_addr_validated)
-    {
-      uint64_t lim = 3 * c->bytes_recv;
-
-      if (c->bytes_sent >= lim)
-        return GQ_OK;
-      if (lim - c->bytes_sent < maxdg)
-        maxdg = (size_t) (lim - c->bytes_sent);
-    }
-  if (c->state == GQ_CONN_CLOSING && !c->close_pending)
-    return GQ_OK;
-  storage = malloc (N_SPACES * sizeof *storage);
-  if (storage == NULL)
-    return GQ_ERR_NOMEM;
-  for (i = 0; i < N_SPACES; i++)
-    {
-      int sp = order[i];
-      pk *p = &storage[n];
-      space *s = &c->sp[sp];
-
-      if (s->discarded || !s->have_wk)
-        continue;
-      if (est + 1 >= maxdg)
-        break;
-      if (!assemble (c, sp, now, maxdg - est, p))
-        continue;
-      pks[n] = p;
-      pns[n] = s->next_pn++;
-      pnl[n] = gq_pn_encoded_len (pns[n], s->have_acked, s->largest_acked);
-      /* Pad tiny payloads so the header protection sample exists.  */
-      while (p->len < 4 - pnl[n] + 0 && p->len < p->cap)
-        p->pl[p->len++] = 0;
-      est += p->hdr_est + p->len;
-      n++;
-      if (c->state == GQ_CONN_CLOSING)
-        continue;
-    }
-  if (n == 0)
-    {
-      free (storage);
-      return GQ_OK;
-    }
-  /* Datagrams with an Initial packet are padded to 1200 bytes: always for
-     a client, and for a server when the Initial is ack-eliciting.  */
-  for (i = 0; i < n; i++)
-    if (pks[i]->sp == SP_INITIAL
-        && (c->role == GQ_ROLE_CLIENT || pks[i]->ae || pks[i]->closing))
-      need_pad = 1;
   if (need_pad && maxdg >= GQ_MIN_INITIAL_DATAGRAM)
     {
       pk *last = pks[n - 1];
@@ -783,14 +751,13 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
       if (p->sp == SP_HANDSHAKE)
         sent_handshake = 1;
     }
-  free (storage);
   if (r != GQ_OK)
     {
       conn_fail (c, GQ_QERR_INTERNAL, "cannot build packet");
       return r;
     }
   *len = total;
-  c->bytes_sent += total;
+  conn_path_note_sent (c, dest, total);
   c->st.bytes_sent += total;
   if (c->state == GQ_CONN_CLOSING)
     {
@@ -808,4 +775,164 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
   if (c->sp[SP_APP].next_pn - c->w_first_pn > ((uint64_t) 1 << 22))
     gq_conn_update_keys (c, now);
   return GQ_OK;
+}
+
+/* A datagram for a path other than the current one: what the peer is
+   owed there (PATH_RESPONSE) and our PATH_CHALLENGE, padded to 1200 bytes
+   when the amplification limit allows (RFC 9000 section 8.2.1).  It goes
+   out under the peer connection ID chosen for that path.  */
+static int
+build_probe (gq_conn *c, uint64_t now, uint8_t *out, size_t cap, size_t *len,
+             int idx)
+{
+  pathinfo *e = &c->paths[idx];
+  space *s = &c->sp[SP_APP];
+  size_t maxdg = conn_max_datagram (c);
+  uint64_t budget;
+  gq_cid saved = c->dcid;
+  pk *p;
+  uint64_t pn;
+  size_t pnl;
+  unsigned k;
+  int r;
+  int limited = conn_path_budget (c, idx, &budget);
+
+  if (maxdg > cap)
+    maxdg = cap;
+  if (limited && budget < maxdg)
+    maxdg = (size_t) budget;
+  if (!s->have_wk || s->discarded || maxdg < 100)
+    return GQ_OK;
+  p = malloc (sizeof *p);
+  if (p == NULL)
+    return GQ_ERR_NOMEM;
+  memset (p, 0, sizeof *p);
+  p->sp = SP_APP;
+  c->dcid = e->dcid;		/* Header size and header both use it.  */
+  p->cap = maxdg - overhead_of (c, SP_APP);
+  p->hdr_est = overhead_of (c, SP_APP);
+  for (k = 0; k < e->n_resp; k++)
+    if (room (p) >= 9)
+      {
+        gq_frame f;
+        sent_frame sf;
+
+        memset (&f, 0, sizeof f);
+        f.type = GQ_FRAME_PATH_RESPONSE;
+        memcpy (f.u.path_challenge.data, e->resp[k], 8);
+        memset (&sf, 0, sizeof sf);
+        sf.type = SF_PATH_RESPONSE;
+        add (p, &f, 1, &sf);
+      }
+  e->n_resp = 0;
+  if (e->need_challenge && room (p) >= 9)
+    {
+      gq_frame f;
+      sent_frame sf;
+
+      memset (&f, 0, sizeof f);
+      f.type = GQ_FRAME_PATH_CHALLENGE;
+      conn_path_challenge_data (c, idx, f.u.path_challenge.data);
+      memset (&sf, 0, sizeof sf);
+      sf.type = SF_PATH_CHALLENGE;
+      add (p, &f, 1, &sf);
+      p->challenge = 1;
+    }
+  if (p->len == 0)
+    {
+      c->dcid = saved;
+      free (p);
+      return GQ_OK;
+    }
+  {
+    pk *pks[1];
+
+    pks[0] = p;
+    pn = s->next_pn++;
+    pnl = gq_pn_encoded_len (pn, s->have_acked, s->largest_acked);
+    while (p->len < 4 - pnl && p->len < p->cap)
+      p->pl[p->len++] = 0;
+    r = finish_datagram (c, now, pks, &pn, &pnl, 1, 1, maxdg, idx, out, len);
+  }
+  c->dcid = saved;
+  c->tx_path = idx;
+  free (p);
+  return r;
+}
+
+int
+conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
+                     size_t *len)
+{
+  size_t maxdg = conn_max_datagram (c), est = 0;
+  static const int order[N_SPACES] = { SP_INITIAL, SP_HANDSHAKE, SP_APP };
+  pk *pks[N_SPACES];
+  uint64_t pns[N_SPACES];
+  size_t pnl[N_SPACES];
+  int n = 0, i, need_pad = 0, r;
+  uint64_t budget;
+  pk *storage;
+
+  *len = 0;
+  if (maxdg > cap)
+    maxdg = cap;
+  if (c->state == GQ_CONN_ESTABLISHED)
+    {
+      int idx = conn_path_probe_pending (c, now);
+
+      if (idx >= 0)
+        return build_probe (c, now, out, cap, len, idx);
+    }
+  if (conn_path_budget (c, c->cur_path, &budget))
+    {
+      if (budget == 0)
+        return GQ_OK;
+      if (budget < maxdg)
+        maxdg = (size_t) budget;
+    }
+  if (c->state == GQ_CONN_CLOSING && !c->close_pending)
+    return GQ_OK;
+  storage = malloc (N_SPACES * sizeof *storage);
+  if (storage == NULL)
+    return GQ_ERR_NOMEM;
+  for (i = 0; i < N_SPACES; i++)
+    {
+      int sp = order[i];
+      pk *p = &storage[n];
+      space *s = &c->sp[sp];
+
+      if (s->discarded || !s->have_wk)
+        continue;
+      if (est + 1 >= maxdg)
+        break;
+      if (!assemble (c, sp, now, maxdg - est, p))
+        continue;
+      pks[n] = p;
+      pns[n] = s->next_pn++;
+      pnl[n] = gq_pn_encoded_len (pns[n], s->have_acked, s->largest_acked);
+      /* Pad tiny payloads so the header protection sample exists.  */
+      while (p->len < 4 - pnl[n] + 0 && p->len < p->cap)
+        p->pl[p->len++] = 0;
+      est += p->hdr_est + p->len;
+      n++;
+      if (c->state == GQ_CONN_CLOSING)
+        continue;
+    }
+  if (n == 0)
+    {
+      free (storage);
+      return GQ_OK;
+    }
+  /* Datagrams with an Initial packet are padded to 1200 bytes: always for
+     a client, and for a server when the Initial is ack-eliciting.  One with
+     a PATH_CHALLENGE is padded too (RFC 9000 section 8.2.1).  */
+  for (i = 0; i < n; i++)
+    if ((pks[i]->sp == SP_INITIAL
+         && (c->role == GQ_ROLE_CLIENT || pks[i]->ae || pks[i]->closing))
+        || pks[i]->challenge)
+      need_pad = 1;
+  r = finish_datagram (c, now, pks, pns, pnl, n, need_pad, maxdg, c->cur_path,
+                       out, len);
+  free (storage);
+  return r;
 }
