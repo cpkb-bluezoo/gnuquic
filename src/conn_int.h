@@ -57,7 +57,7 @@ enum sf_type
   SF_CRYPTO = 1, SF_STREAM, SF_RESET_STREAM, SF_STOP_SENDING, SF_MAX_DATA,
   SF_MAX_STREAM_DATA, SF_MAX_STREAMS, SF_DATA_BLOCKED,
   SF_STREAM_DATA_BLOCKED, SF_NEW_CID, SF_RETIRE_CID, SF_HANDSHAKE_DONE,
-  SF_ACK, SF_PATH_RESPONSE, SF_NEW_TOKEN, SF_PATH_CHALLENGE
+  SF_ACK, SF_PATH_RESPONSE, SF_NEW_TOKEN, SF_PATH_CHALLENGE, SF_DATAGRAM
 };
 
 typedef struct sent_frame
@@ -160,6 +160,7 @@ struct gq_conn
   enum gq_conn_state state;
   gq_conn_config cfg;
   gq_conn_events ev;
+  gq_conn_router router;
   uint32_t version;
   uint32_t orig_version;	/* Version of the first flight.  */
   uint8_t switched;		/* A compatible version switch happened.  */
@@ -260,6 +261,11 @@ struct gq_conn
   size_t n_streams, cap_streams, rr;
 
   /* Pending control frames.  */
+  /* Queued outgoing DATAGRAMs (RFC 9221).  */
+  struct dgram { uint8_t *data; size_t len; uint64_t id; } *dq;
+  size_t dq_head, dq_n, dq_cap, dq_bytes;
+  uint64_t next_dgram_id;
+  uint64_t datagrams_sent, datagrams_received, datagrams_dropped;
   pathinfo paths[MAX_PATHS];
   int cur_path, prev_path;	/* Indices, -1: none.  */
   int tx_path;			/* Where the datagram being built goes.  */
@@ -290,6 +296,9 @@ void conn_enter_closing (gq_conn *c, gq_conn_close_info *info, int draining);
 int conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
                        const uint8_t *client_scid, size_t client_scid_len);
 void conn_recompute_idle (gq_conn *c, uint64_t now);
+void conn_wake (gq_conn *c);
+void conn_peer_token (gq_conn *c, const uint8_t *token);
+void conn_cid_retired (gq_conn *c, const gq_cid *cid);
 int conn_client_restart (gq_conn *c, uint32_t version);
 int conn_version_compatible (uint32_t a, uint32_t b);
 int conn_version_listed (const gq_conn *c, uint32_t v);
@@ -326,6 +335,11 @@ uint64_t stream_initial_send_credit (const gq_conn *c, uint64_t id);
 uint64_t stream_initial_recv_credit (const gq_conn *c, uint64_t id);
 int stream_handle_frame (gq_conn *c, const gq_frame *f);
 void stream_on_acked (gq_conn *c, uint64_t id);
+
+/* conn_datagram.c */
+void datagrams_free (gq_conn *c);
+struct dgram *datagram_front (gq_conn *c);
+void datagram_pop (gq_conn *c);
 
 /* conn_path.c */
 void conn_path_init (gq_conn *c, const gq_path *initial);

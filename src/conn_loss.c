@@ -228,6 +228,10 @@ requeue_frames (gq_conn *c, int sp, sent_pkt *p)
         case SF_HANDSHAKE_DONE:
           c->handshake_done_pending = 1;
           break;
+        case SF_DATAGRAM:
+          if (c->ev.datagram_lost)
+            c->ev.datagram_lost (c->ev.user, f->a);
+          break;
         case SF_NEW_TOKEN:
           if (c->token_keys)
             c->new_token_pending = 1;
@@ -276,6 +280,10 @@ frames_acked (gq_conn *c, int sp, const sent_pkt *p)
           for (k = 0; k < MAX_LCID; k++)
             if (c->l[k].used && c->l[k].seq == f->a)
               c->l[k].announced = 1;
+          break;
+        case SF_DATAGRAM:
+          if (c->ev.datagram_acked)
+            c->ev.datagram_acked (c->ev.user, f->a);
           break;
         case SF_RETIRE_CID:
           for (k = 0; k < MAX_PCID; k++)

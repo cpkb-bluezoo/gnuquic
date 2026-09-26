@@ -3,6 +3,14 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** DATAGRAM frames (RFC 9221) with acknowledgement and loss notification,
+and the endpoint layer (endpoint.h): connections behind one socket are
+routed by connection ID, new clients are admitted (Version Negotiation,
+Retry always or when busy, tokens), unknown connections are answered
+with rate limited stateless resets whose tokens derive from a key, and
+timers are kept in a heap so idle connections cost nothing. Tested
+in simulation and against quiche (four clients at once, datagrams both
+ways).
 ** Path validation and connection migration (RFC 9000 sections 8.2 and 9):
 gq_conn_recv_path and gq_conn_send_path carry opaque addresses; a server
 follows a peer that moves (validating the new path, limiting what it sends

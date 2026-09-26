@@ -21,6 +21,7 @@ lib_LTLIBRARIES = libgnuquic.la
 libgnuquic_la_SOURCES = \
   crypto.c \
   dtls.c \
+  endpoint.c \
   conn_int.h \
   dtls_int.h \
   dtls12.c \
@@ -39,6 +40,7 @@ libgnuquic_la_SOURCES = \
   listen.c \
   ranges.c \
   conn.c \
+  conn_datagram.c \
   conn_loss.c \
   conn_path.c \
   conn_recv.c \
@@ -93,6 +95,7 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/policy.h \
   $(top_srcdir)/include/gnuquic/protect.h \
   $(top_srcdir)/include/gnuquic/conn.h \
+  $(top_srcdir)/include/gnuquic/endpoint.h \
   $(top_srcdir)/include/gnuquic/listen.h \
   $(top_srcdir)/include/gnuquic/ranges.h \
   $(top_srcdir)/include/gnuquic/stream.h \

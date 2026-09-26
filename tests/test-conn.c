@@ -79,6 +79,9 @@ struct app
   int have_sess;
   uint32_t sess_version;
   int pv, pf, mig;		/* Path events.  */
+  int dg_recv, dg_bad, dg_acked, dg_lost;
+  uint8_t dg_seen[1024];	/* By the id in the payload.  */
+  uint8_t dg_fate[1024];
   gq_path last_mig;
 };
 
@@ -285,6 +288,50 @@ ev_migrated (void *u, const gq_path *p)
 
   a->mig++;
   a->last_mig = *p;
+}
+
+static void
+ev_datagram (void *u, const uint8_t *d, size_t n)
+{
+  struct app *a = u;
+  size_t i;
+
+  /* Payload: id (2 bytes), then a pattern.  */
+  if (n < 2)
+    {
+      a->dg_bad++;
+      return;
+    }
+  i = (size_t) (d[0] << 8 | d[1]);
+  for (size_t k = 2; k < n; k++)
+    if (d[k] != (uint8_t) (i * 5 + k))
+      {
+        a->dg_bad++;
+        return;
+      }
+  if (i < sizeof a->dg_seen)
+    a->dg_seen[i]++;
+  a->dg_recv++;
+}
+
+static void
+ev_dg_acked (void *u, uint64_t id)
+{
+  struct app *a = u;
+
+  a->dg_acked++;
+  if (id < sizeof a->dg_fate)
+    a->dg_fate[id]++;
+}
+
+static void
+ev_dg_lost (void *u, uint64_t id)
+{
+  struct app *a = u;
+
+  a->dg_lost++;
+  if (id < sizeof a->dg_fate)
+    a->dg_fate[id]++;
 }
 
 static void
@@ -616,6 +663,9 @@ fill_events (gq_conn_events *e, struct app *a)
   e->cid_retired = ev_cid_retired;
   e->new_token = ev_new_token;
   e->ticket = ev_ticket;
+  e->datagram = ev_datagram;
+  e->datagram_acked = ev_dg_acked;
+  e->datagram_lost = ev_dg_lost;
   e->path_validated = ev_path_validated;
   e->path_failed = ev_path_failed;
   e->migrated = ev_migrated;
@@ -1313,6 +1363,126 @@ test_resumption (void)
   g_ring = NULL;
 }
 
+/* ---- DATAGRAM ---- */
+
+static int transfer_done (struct net *n);
+static struct sbuf *start_transfer (struct pair *p, size_t resp);
+
+/* Send N datagrams of SIZE bytes (or up to it) from side FROM.  */
+static int
+send_datagrams (struct pair *p, struct app *from, int base, int n,
+                size_t size)
+{
+  int i, ok = 0;
+
+  for (i = 0; i < n; i++)
+    {
+      uint8_t buf[1300];
+      int nn = base + i;
+      size_t len = size ? size : 2 + (size_t) (nn * 37) % 900, k;
+      uint64_t id;
+
+      if (len < 2)
+        len = 2;
+      buf[0] = (uint8_t) (nn >> 8);
+      buf[1] = (uint8_t) nn;
+      for (k = 2; k < len; k++)
+        buf[k] = (uint8_t) ((size_t) nn * 5 + k);
+      if (gq_conn_datagram_send (from->c, buf, len, &id) == GQ_OK)
+        ok++;
+      run (&p->net, NULL, 2000);
+    }
+  return ok;
+}
+
+static void
+test_datagrams (void)
+{
+  gq_conn_config on, off;
+  struct pair *p;
+  uint8_t buf[2000];
+  uint64_t id;
+  size_t max;
+  int sent, i, seen = 0;
+
+  memset (&on, 0, sizeof on);
+  memset (&off, 0, sizeof off);
+  on.max_datagram_frame_size = 1200;
+  /* Off by default: nothing can be sent, either way.  */
+  p = pair_new (&off, &off, 0, 110);
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_datagram_send (p->cli.c, buf, 10, &id), GQ_ERR_UNAVAILABLE);
+  CHECK_EQ (gq_conn_datagram_max (p->cli.c), 0);
+  pair_free (p);
+  /* Only the server takes them: the client may send, the server may not.  */
+  p = pair_new (&off, &on, 0, 111);
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_datagram_send (p->srv.c, buf, 10, &id), GQ_ERR_UNAVAILABLE);
+  max = gq_conn_datagram_max (p->cli.c);
+  CHECK (max > 1000 && max < 1200);
+  CHECK_EQ (gq_conn_datagram_send (p->cli.c, buf, max + 1, &id), GQ_ERR_RANGE);
+  sent = send_datagrams (p, &p->cli, 0, 40, 0);
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (sent, 40);
+  CHECK (p->srv.dg_recv == 40 && p->srv.dg_bad == 0);
+  CHECK (p->cli.dg_acked == 40 && p->cli.dg_lost == 0);
+  /* The biggest that fits, exactly.  */
+  memset (buf, 0, sizeof buf);
+  buf[0] = 0;
+  buf[1] = 50;
+  for (i = 2; i < (int) max; i++)
+    buf[i] = (uint8_t) (50 * 5 + i);
+  CHECK_EQ (gq_conn_datagram_send (p->cli.c, buf, max, &id), GQ_OK);
+  run (&p->net, NULL, 500000);
+  CHECK_EQ (p->srv.dg_recv, 41);
+  CHECK_EQ (p->srv.dg_bad, 0);
+  pair_free (p);
+
+  /* Both ways, alongside a stream transfer, with loss: every datagram is
+     reported acknowledged or lost exactly once, and none arrives twice or
+     damaged.  */
+  on.send_buffer = 100000;
+  p = pair_new (&on, &on, 10, 112);
+  CHECK (run (&p->net, both_connected, 60000000));
+  {
+    struct sbuf *s = start_transfer (p, 200000);
+    int a = 0, b = 0;
+
+    for (i = 0; i < 100; i++)
+      {
+        a += send_datagrams (p, &p->cli, i, 1, 0);
+        b += send_datagrams (p, &p->srv, i, 1, 300);
+      }
+    CHECK (run (&p->net, transfer_done, 120000000));
+    CHECK_EQ (s->n, 200000);
+    run (&p->net, NULL, 3000000);
+    CHECK (a == 100 && b == 100);
+    CHECK_EQ (p->cli.dg_acked + p->cli.dg_lost, a);
+    CHECK_EQ (p->srv.dg_acked + p->srv.dg_lost, b);
+    for (i = 0; i < 100; i++)
+      {
+        CHECK_EQ (p->cli.dg_fate[i], 1);
+        CHECK_EQ (p->srv.dg_fate[i], 1);
+        CHECK (p->srv.dg_seen[i] <= 1 && p->cli.dg_seen[i] <= 1);
+        seen += p->srv.dg_seen[i];
+      }
+    CHECK (seen > 60 && seen <= 100);		/* Loss, but not total.  */
+    CHECK (p->srv.dg_recv <= 100 && p->cli.dg_recv <= 100);
+    CHECK_EQ (p->srv.dg_bad + p->cli.dg_bad, 0);
+  }
+  pair_free (p);
+
+  /* A full queue refuses.  */
+  on.datagram_queue = 3000;
+  p = pair_new (&on, &on, 0, 113);
+  CHECK (run (&p->net, both_connected, 30000000));
+  for (i = 0; i < 20; i++)
+    if (gq_conn_datagram_send (p->cli.c, buf, 1000, &id) == GQ_ERR_BUFSIZE)
+      break;
+  CHECK (i >= 3 && i < 20);
+  pair_free (p);
+}
+
 /* ---- Path validation and migration ---- */
 
 static struct pair *
@@ -1850,6 +2020,7 @@ main (void)
   test_admit_input ();
   test_compat ();
   test_resumption ();
+  test_datagrams ();
   test_nat_rebinding ();
   test_active_migration ();
   test_old_path_traffic ();

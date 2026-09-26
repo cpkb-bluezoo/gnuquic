@@ -52,6 +52,7 @@ Documentation License''.
 * Security policy::       What is negotiated, and what is absent.
 * Early data::            0-RTT and its anti-replay rules.
 * QUIC connections::      Connection and stream state.
+* Endpoint::              Many connections behind one socket.
 * Address validation::    Retry, tokens and the admission step.
 * Version negotiation::   Version Negotiation and RFC 9368.
 * Path validation and migration::  Moving between network paths.
@@ -685,13 +686,63 @@ Initial packets to 1200 bytes; a client pads all its Initial datagrams.
 Keys are discarded as the handshake progresses, and the 1-RTT keys are
 updated on request, when the peer updates, and before the AEAD limit.
 
+@heading DATAGRAM
+Unreliable datagrams (RFC 9221) are enabled with
+@code{max_datagram_frame_size} in the configuration (0, the default,
+leaves them off) and need the peer to enable them too.
+@code{gq_conn_datagram_send} queues one (a bounded queue) and returns an
+id; it goes out ahead of stream data in the next packet with room, under
+congestion control, and is never retransmitted.  The @code{datagram}
+event delivers received ones, and @code{datagram_acked} and
+@code{datagram_lost} report the fate of each sent one by id.
+
 @heading Limits of this step
-Pacing and ECN, 0-RTT, path validation and migration, and DATAGRAM are not
-implemented yet, and a server needs an endpoint layer above it to route
-datagrams by connection ID (the connection reports the IDs it issues
-through @code{cid_issued}).  The receiving side treats a few limits as
+Pacing and ECN and 0-RTT are not implemented yet.  The receiving side treats a few limits as
 fixed: 64 tracked packet number ranges per space and 8 connection IDs
 in each direction.
+
+@node Endpoint
+@chapter Endpoint
+
+@cindex endpoint
+@file{endpoint.h} puts many connections behind one socket.  Like the
+connection it owns no socket, thread or timer: feed it every datagram
+(@code{gq_endpoint_recv}), take datagrams to send until it yields none
+(@code{gq_endpoint_send}), and call @code{gq_endpoint_on_timeout} when
+@code{gq_endpoint_timeout} says.  A serving endpoint is given a TLS server
+configuration and an @code{accept} callback that fills in the event
+callbacks of each new connection; a client-only endpoint just uses
+@code{gq_endpoint_connect}.  Connections it creates belong to it and are
+freed after the @code{done} callback.
+
+@heading Routing
+Each connection reports the connection IDs it issues and retires (the
+router hooks of @file{conn.h}); the endpoint keeps them in a hash table
+seeded per endpoint and routes a datagram by its destination ID.  The
+client's first destination ID stays routed to the server connection it
+created.  All connections of an endpoint use the same ID length.
+
+@heading Admission
+A long header datagram for an unknown ID goes through
+@code{gq_quic_admit} (@ref{Address validation}): Version Negotiation,
+Retry (always, or once @code{retry_above} connections exist) or a new
+connection, subject to @code{max_connections}.
+
+@heading Stateless reset
+A short header datagram for an unknown ID is first checked against the
+stateless reset tokens the endpoint's peers gave (a hash table again): a
+match means the peer reset a connection and it ends.  Otherwise the
+endpoint answers with a stateless reset, at most
+@code{max_resets_per_second} of them, smaller than the trigger.  Tokens
+derive from a key (HMAC of the connection ID), so an endpoint that lost
+its state, or another endpoint holding the same key, answers correctly.
+
+@heading Scheduling
+The endpoint remembers which connections may have something to send (the
+connection says so after any call that can produce output) and serves them
+in turn, so that one busy connection cannot starve the rest.  Deadlines
+sit in a heap with lazy invalidation, so the cost of a quiet connection is
+nothing until its timer is due.
 
 @node Address validation
 @chapter Address validation
@@ -947,8 +998,10 @@ information and compatible negotiation between QUIC v1 and v2.
 migration}).
 
 @item
-0-RTT wiring, DATAGRAM (RFC 9221), and the endpoint layer that routes
-datagrams to connections by connection ID.
+@strong{Done.}  DATAGRAM (RFC 9221) and the endpoint layer (@ref{Endpoint}).
+
+@item
+0-RTT wiring.
 @end enumerate
 
 @item

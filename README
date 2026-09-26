@@ -78,17 +78,18 @@ Pre-alpha.  What exists today:
            default, and tickets are bound to the version)
   (conn also does path validation, peer migration and client-initiated
            migration over caller-supplied opaque addresses)
+  endpoint many connections behind one socket: routing by connection ID,
+           admission (Version Negotiation, Retry), stateless reset, a
+           deadline heap; DATAGRAM frames (RFC 9221) in conn
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle
            timeout, close and stateless reset; NewReno congestion control
            (RFC 9002 section 7); interoperating with quiche
 
-Not yet written: pacing and ECN, address validation tokens and Retry,
-Version Negotiation
-and RFC 9368, 0-RTT early data, path validation and migration, DATAGRAM,
-and the endpoint layer that routes datagrams to connections.  See the
-manual (doc/gnuquic.texi) for the design, security policy and roadmap.
+Not yet written: pacing and ECN, 0-RTT early data, the server's
+preferred_address, and the HTTP/3 and DoQ examples.  See the manual
+(doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building
 --------

@@ -50,6 +50,7 @@
 #include <gnuquic/status.h>
 #include <gnuquic/conn.h>
 #include <gnuquic/listen.h>
+#include <gnuquic/endpoint.h>
 
 #include "interop-util.h"
 
@@ -89,6 +90,8 @@ struct app
   gq_conn_config cfg;
   int retry;
   gq_token_keys keys;
+  int dgram, dgram_left, dgram_recv;	/* DATAGRAM: enabled, to send.  */
+  struct app *next;			/* Server: connections in a list.  */
 };
 
 static uint64_t
@@ -168,6 +171,10 @@ pump (struct app *a)
 
   if (a->c == NULL || gq_conn_state (a->c) >= GQ_CONN_CLOSING)
     return;
+  while (a->dgram_left > 0 && a->connected
+         && gq_conn_datagram_send (a->c, (const uint8_t *) "brrr", 4, NULL)
+            == GQ_OK)
+    a->dgram_left--;
   for (i = 0; i < a->nx; i++)
     {
       struct xfer *x = &a->x[i];
@@ -270,6 +277,17 @@ ev_closed (void *u, const gq_conn_close_info *i)
   printf ("CLOSED source=%d application=%d error=%llu reason=%.*s\n", i->source,
           i->application, (unsigned long long) i->error, (int) i->reason_len,
           i->reason ? (const char *) i->reason : "");
+  fflush (stdout);
+}
+
+static void
+ev_datagram (void *u, const uint8_t *d, size_t n)
+{
+  struct app *a = u;
+
+  (void) d;
+  a->dgram_recv++;
+  printf ("DATAGRAM bytes=%zu\n", n);
   fflush (stdout);
 }
 
@@ -486,6 +504,8 @@ new_conn (struct app *a, struct cfgs *g)
 static int
 loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
 {
+  (void) g;
+  (void) one_shot;
   uint64_t start = now_us ();
   uint8_t buf[65536];
 
@@ -540,40 +560,6 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
 
           if (n > 0 && !lose (a))
             {
-              if (a->server && a->c == NULL)
-                {
-                  gq_admit_config ac;
-                  gq_conn_accept acc;
-                  uint8_t reply[1500], key[20];
-                  size_t rl = 0, kl = 0;
-                  int act;
-                  struct sockaddr_in *sin = (struct sockaddr_in *) &from;
-
-                  memset (&ac, 0, sizeof ac);
-                  ac.require_retry = a->retry;
-                  memcpy (ac.versions, a->cfg.versions, sizeof ac.versions);
-                  ac.n_versions = a->cfg.n_versions;
-                  memcpy (key, &sin->sin_addr, 4);
-                  memcpy (key + 4, &sin->sin_port, 2);
-                  kl = 6;
-                  act = gq_quic_admit (&a->keys, &ac, key, kl, buf, (size_t) n,
-                                       (uint64_t) time (NULL), reply,
-                                       sizeof reply, &rl, &acc);
-                  if (act == GQ_ADMIT_REPLY)
-                    {
-                      sendto (a->fds[0], reply, rl, 0,
-                              (struct sockaddr *) &from, fl);
-                      continue;
-                    }
-                  if (act != GQ_ADMIT_ACCEPT)
-                    continue;
-                  a->peer = from;
-                  a->plen = fl;
-                  a->have_peer = 1;
-                  if (gq_conn_server_accept (&a->c, &a->cfg, &g->sc, &a->ev,
-                                             now_us (), &acc) != GQ_OK)
-                    return 1;
-                }
               if (a->c)
                 {
                   gq_conn_stats st;
@@ -592,6 +578,140 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
       if (a->closed && a->c && gq_conn_state (a->c) == GQ_CONN_DONE)
         return one_shot ? 0 : 0;
     }
+}
+
+/* ---- Server on an endpoint: any number of connections at once ---- */
+
+struct server
+{
+  struct app *tmpl;		/* Settings; its list holds the connections.  */
+  struct app *conns;
+  struct app *pending;
+  int accepted, finished;
+};
+
+static int
+srv_accept (void *u, const gq_path *from, gq_conn_events *ev)
+{
+  struct server *sv = u;
+  struct app *ca = calloc (1, sizeof *ca);
+
+  (void) from;
+  *ca = *sv->tmpl;
+  ca->c = NULL;
+  ca->x = NULL;
+  ca->nx = ca->capx = 0;
+  ca->connected = ca->closed = 0;
+  ca->next = sv->conns;
+  sv->conns = ca;
+  sv->pending = ca;
+  *ev = sv->tmpl->ev;
+  ev->user = ca;
+  sv->accepted++;
+  return 0;
+}
+
+static void
+srv_connection (void *u, gq_conn *c)
+{
+  struct server *sv = u;
+
+  if (sv->pending)
+    sv->pending->c = c;
+  sv->pending = NULL;
+}
+
+static void
+srv_done (void *u, gq_conn *c)
+{
+  struct server *sv = u;
+  struct app **pp, *ca;
+  size_t k;
+
+  for (pp = &sv->conns; *pp; pp = &(*pp)->next)
+    if ((*pp)->c == c)
+      {
+        ca = *pp;
+        *pp = ca->next;
+        for (k = 0; k < ca->nx; k++)
+          free (ca->x[k].data);
+        free (ca->x);
+        free (ca);
+        break;
+      }
+  sv->finished++;
+}
+
+static int
+serve (struct app *tmpl, struct cfgs *g, int timeout_s, int max_conns)
+{
+  struct server sv;
+  gq_endpoint_config ec;
+  gq_endpoint_events ee;
+  gq_endpoint *ep;
+  uint64_t start = now_us ();
+  uint8_t buf[65536];
+
+  memset (&sv, 0, sizeof sv);
+  sv.tmpl = tmpl;
+  memset (&ec, 0, sizeof ec);
+  ec.conn = tmpl->cfg;
+  ec.server = &g->sc;
+  ec.admit.require_retry = tmpl->retry;
+  memset (&ee, 0, sizeof ee);
+  ee.user = &sv;
+  ee.accept = srv_accept;
+  ee.connection = srv_connection;
+  ee.done = srv_done;
+  if (gq_endpoint_new (&ep, &ec, &ee) != GQ_OK)
+    return 1;
+  for (;;)
+    {
+      uint64_t now = now_us (), t;
+      struct app *ca;
+      uint8_t out[2048];
+      size_t len;
+      gq_path to;
+      int wait_ms = 100;
+      struct sockaddr_storage from;
+      socklen_t fl;
+      gq_path rp;
+      ssize_t n;
+
+      for (ca = sv.conns; ca; ca = ca->next)
+        pump (ca);
+      while (gq_endpoint_send (ep, now, out, sizeof out, &len, &to) == GQ_OK
+             && len)
+        {
+          struct sockaddr_storage dest;
+          socklen_t dl;
+
+          if (lose (tmpl) || to.remote.len != 6)
+            continue;
+          from_addr (&to.remote, &dest, &dl);
+          sendto (tmpl->fds[0], out, len, 0, (struct sockaddr *) &dest, dl);
+        }
+      if (max_conns && sv.finished >= max_conns)
+        break;
+      if (now - start > (uint64_t) timeout_s * 1000000)
+        {
+          fprintf (stderr, "timeout\n");
+          gq_endpoint_free (ep);
+          return 2;
+        }
+      t = gq_endpoint_timeout (ep);
+      if (t)
+        wait_ms = t > now ? (int) ((t - now + 999) / 1000) : 0;
+      if (wait_ms > 50)
+        wait_ms = 50;
+      n = wait_datagram (tmpl, wait_ms, buf, sizeof buf, &from, &fl, &rp);
+      if (n > 0 && !lose (tmpl))
+        gq_endpoint_recv (ep, now_us (), &rp, buf, (size_t) n);
+      if ((t = gq_endpoint_timeout (ep)) != 0 && t <= now_us ())
+        gq_endpoint_on_timeout (ep, now_us ());
+    }
+  gq_endpoint_free (ep);
+  return 0;
 }
 
 int
@@ -639,6 +759,12 @@ main (int argc, char **argv)
       else if (!strcmp (o, "--v2")) a.v2 = 1;
       else if (!strcmp (o, "--retry")) a.retry = 1;
       else if (!strcmp (o, "--migrate")) a.migrate = 1;
+      else if (!strcmp (o, "--dgram") && v)
+        {
+          a.dgram = 1;
+          a.dgram_left = atoi (v);
+          i++;
+        }
       else if (!strcmp (o, "--versions") && v)
         {
           /* Comma separated list of 1 and 2, most preferred first.  */
@@ -667,9 +793,12 @@ main (int argc, char **argv)
   a.ev.stream_writable = ev_writable;
   a.ev.closed = ev_closed;
   a.ev.ticket = ev_ticket;
+  a.ev.datagram = ev_datagram;
   a.ev.path_validated = ev_path_validated;
   a.ev.path_failed = ev_path_failed;
   a.ev.migrated = ev_migrated;
+  if (a.dgram)
+    a.cfg.max_datagram_frame_size = 1200;
   g.alpn[0].data = (const uint8_t *) alpn;
   g.alpn[0].len = strlen (alpn);
 
@@ -718,23 +847,7 @@ main (int argc, char **argv)
       }
       printf ("LISTENING\n");
       fflush (stdout);
-      while (connections-- > 0)
-        {
-          size_t k;
-
-          r = loop (&a, &g, timeout, 1);
-          for (k = 0; k < a.nx; k++)
-            free (a.x[k].data);
-          free (a.x);
-          a.x = NULL;
-          a.nx = a.capx = 0;
-          gq_conn_free (a.c);
-          a.c = NULL;
-          a.have_peer = 0;
-          a.closed = 0;
-          if (r)
-            break;
-        }
+      r = serve (&a, &g, timeout, connections);
       return r ? 2 : 0;
     }
   else

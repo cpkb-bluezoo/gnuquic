@@ -111,15 +111,20 @@ new_lcid (gq_conn *c, int announced, const gq_cid *fixed)
   if (fixed)
     l->cid = *fixed;
   if ((!fixed && gq_random (l->cid.data, l->cid.len) != GQ_OK)
-      || gq_random (l->token, sizeof l->token) != GQ_OK)
+      || (!c->cfg.reset_token
+          && gq_random (l->token, sizeof l->token) != GQ_OK))
     {
       l->used = 0;
       return GQ_ERR_CRYPTO;
     }
+  if (c->cfg.reset_token)
+    c->cfg.reset_token (c->cfg.reset_user, l->cid.data, l->cid.len, l->token);
   l->announced = (uint8_t) announced;
   l->need_send = !announced;
   if (c->ev.cid_issued)
     c->ev.cid_issued (c->ev.user, l->cid.data, l->cid.len, l->token);
+  if (c->router.cid_issued)
+    c->router.cid_issued (c->router.user, c, l->cid.data, l->cid.len);
   return GQ_OK;
 }
 
@@ -127,6 +132,60 @@ int
 conn_new_lcid (gq_conn *c, int announced)
 {
   return new_lcid (c, announced, NULL);
+}
+
+void
+conn_wake (gq_conn *c)
+{
+  if (c->router.wake)
+    c->router.wake (c->router.user, c);
+}
+
+void
+conn_peer_token (gq_conn *c, const uint8_t *token)
+{
+  if (c->router.peer_token)
+    c->router.peer_token (c->router.user, c, token);
+}
+
+void
+gq_conn_stateless_reset (gq_conn *c, uint64_t now_us)
+{
+  gq_conn_close_info info;
+
+  c->now = now_us;
+  memset (&info, 0, sizeof info);
+  info.source = GQ_CLOSE_RESET;
+  conn_enter_closing (c, &info, 1);
+}
+
+void
+conn_cid_retired (gq_conn *c, const gq_cid *cid)
+{
+  if (c->ev.cid_retired)
+    c->ev.cid_retired (c->ev.user, cid->data, cid->len);
+  if (c->router.cid_retired)
+    c->router.cid_retired (c->router.user, c, cid->data, cid->len);
+}
+
+void
+gq_conn_set_router (gq_conn *c, const gq_conn_router *router)
+{
+  if (router)
+    c->router = *router;
+  else
+    memset (&c->router, 0, sizeof c->router);
+}
+
+size_t
+gq_conn_local_cids (const gq_conn *c, gq_cid *out, size_t max)
+{
+  size_t i, n = 0;
+
+  for (i = 0; i < MAX_LCID && n < max; i++)
+    if (c->l[i].used)
+      out[n++] = c->l[i].cid;
+  return n;
 }
 
 /* ---- Failure and closing ---- */
@@ -188,6 +247,7 @@ gq_conn_close (gq_conn *c, uint64_t now_us, int application, uint64_t error,
   if (c->state >= GQ_CONN_CLOSING)
     return GQ_OK;
   c->now = now_us;
+  conn_wake (c);
   c->close_pending = 1;
   c->close_app = application != 0;
   c->close_err = error;
@@ -317,6 +377,11 @@ local_params (gq_conn *c, gq_transport_params *tp)
     tp->n_available_versions = n;
   }
   gq_tp_set_present (tp, GQ_TP_VERSION_INFORMATION);
+  if (g->max_datagram_frame_size)
+    {
+      tp->max_datagram_frame_size = g->max_datagram_frame_size;
+      gq_tp_set_present (tp, GQ_TP_MAX_DATAGRAM_FRAME_SIZE);
+    }
   if (g->disable_active_migration)
     gq_tp_set_present (tp, GQ_TP_DISABLE_ACTIVE_MIGRATION);
   if (c->role == GQ_ROLE_SERVER)
@@ -366,7 +431,10 @@ conn_apply_peer_params (gq_conn *c)
   c->peer_max_ack_delay_us = p->max_ack_delay * 1000;
   c->peer_cid_limit = (size_t) p->active_connection_id_limit;
   if (gq_tp_has (p, GQ_TP_STATELESS_RESET_TOKEN))
-    memcpy (c->p[0].token, p->stateless_reset_token, GQ_RESET_TOKEN_LEN);
+    {
+      memcpy (c->p[0].token, p->stateless_reset_token, GQ_RESET_TOKEN_LEN);
+      conn_peer_token (c, c->p[0].token);
+    }
   idle = p->max_idle_timeout * 1000;
   if (idle && (c->idle_timeout_us == 0 || idle < c->idle_timeout_us))
     c->idle_timeout_us = idle;
@@ -601,6 +669,8 @@ fill_defaults (gq_conn_config *g)
     g->initial_max_streams_bidi = DEFAULT_STREAMS;
   if (g->initial_max_streams_uni == 0)
     g->initial_max_streams_uni = DEFAULT_STREAMS;
+  if (g->datagram_queue == 0)
+    g->datagram_queue = 64u << 10;
   if (g->send_buffer == 0)
     g->send_buffer = 256u << 10;
   if (g->max_udp_payload == 0)
@@ -944,6 +1014,7 @@ gq_conn_free (gq_conn *c)
     return;
   gq_tls_free (c->tls);
   gq_ticket_keys_free (c->ticket_v2);
+  datagrams_free (c);
   for (i = 0; i < N_SPACES; i++)
     {
       space *s = &c->sp[i];
@@ -1008,6 +1079,9 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->path_validations = c->path_validations;
   st->path_failures = c->path_failures;
   st->migrations = c->migrations;
+  st->datagrams_sent = c->datagrams_sent;
+  st->datagrams_received = c->datagrams_received;
+  st->datagrams_dropped = c->datagrams_dropped;
 }
 
 int

@@ -593,6 +593,7 @@ gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path)
   if (idx < 0)
     return GQ_ERR_RANGE;
   start_validation (c, &c->paths[idx], now_us);
+  conn_wake (c);
   return GQ_OK;
 }
 
@@ -615,5 +616,6 @@ gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path)
     switch_to (c, idx);
   else
     c->paths[idx].auto_switch = 1;
+  conn_wake (c);
   return GQ_OK;
 }
