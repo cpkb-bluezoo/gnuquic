@@ -17,8 +17,8 @@
    <https://www.gnu.org/licenses/>.  */
 
 /* Sent-packet tracking, acknowledgement processing, RTT estimation, loss
-   detection and probe timeouts (RFC 9002 sections 5 and 6).  Congestion
-   control is not implemented yet: see MAX_BYTES_IN_FLIGHT.  */
+   detection, probe timeouts and NewReno congestion control (RFC 9002
+   sections 5 to 7).  */
 
 #ifdef HAVE_CONFIG_H
 # include <config.h>
@@ -35,6 +35,64 @@ free_sent_frames (sent_pkt *p)
   free (p->frames);
   p->frames = NULL;
   p->nframes = 0;
+}
+
+/* ---- Congestion control (RFC 9002 section 7) ---- */
+
+void
+cc_init (gq_conn *c)
+{
+  c->cwnd = CC_INITIAL_WINDOW;
+  c->ssthresh = UINT64_MAX;
+  c->recovery_start = 0;
+  c->ca_acked = 0;
+}
+
+/* LIMITED: the window was in use when the ACK arrived, so growing it is
+   justified.  */
+static void
+cc_on_ack (gq_conn *c, const sent_pkt *p, int limited)
+{
+  if (!p->in_flight)
+    return;
+  if (c->recovery_start && p->time_us <= c->recovery_start)
+    return;			/* Sent before recovery began.  */
+  if (!limited)
+    return;
+  if (c->cwnd < c->ssthresh)
+    c->cwnd += p->size;
+  else
+    {
+      c->ca_acked += p->size;
+      if (c->ca_acked >= c->cwnd)
+        {
+          c->ca_acked -= c->cwnd;
+          c->cwnd += CC_MAX_DATAGRAM;
+        }
+    }
+}
+
+/* LOST_SENT: send time of the newest packet lost in this round.  */
+static void
+cc_on_loss (gq_conn *c, uint64_t lost_sent, uint64_t now)
+{
+  if (c->recovery_start && lost_sent <= c->recovery_start)
+    return;			/* Already in recovery for this loss.  */
+  c->recovery_start = now;
+  c->congestion_events++;
+  c->ssthresh = c->cwnd / 2;
+  if (c->ssthresh < CC_MIN_WINDOW)
+    c->ssthresh = CC_MIN_WINDOW;
+  c->cwnd = c->ssthresh;
+  c->ca_acked = 0;
+}
+
+static void
+cc_persistent (gq_conn *c)
+{
+  c->cwnd = CC_MIN_WINDOW;
+  c->recovery_start = 0;
+  c->ca_acked = 0;
 }
 
 void
@@ -264,7 +322,10 @@ ack_range (void *user, uint64_t lo, uint64_t hi)
 {
   ack_ctx *x = user;
   space *s = x->s;
-  size_t i = sent_lower_bound (s, lo), j = i;
+  size_t i, j;
+
+  gq_ranges_add (&s->acked_pns, lo, hi + 1, 1);
+  i = j = sent_lower_bound (s, lo);
 
   while (j < s->n_sent && s->sent[j].pn <= hi)
     j++;
@@ -299,8 +360,8 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
   space *s = &c->sp[sp];
   ack_ctx x;
   size_t i;
-  int have_largest = 0, ae = 0;
-  uint64_t largest_time = 0;
+  int have_largest = 0, ae = 0, limited;
+  uint64_t largest_time = 0, before = c->bytes_in_flight;
 
   if (s->discarded)
     return;
@@ -346,10 +407,13 @@ process_ack (gq_conn *c, int sp, const gq_frame *f, uint64_t now)
         }
       update_rtt (c, now > largest_time ? now - largest_time : 0, delay);
     }
+  limited = c->cwnd < c->ssthresh ? before >= c->cwnd / 2
+                                  : before + CC_MAX_DATAGRAM >= c->cwnd;
   for (i = 0; i < x.n; i++)
     {
       sent_pkt *p = &x.got[i];
 
+      cc_on_ack (c, p, limited);
       if (p->in_flight)
         c->bytes_in_flight -= p->size;
       if (p->ack_eliciting && s->ae_in_flight)
@@ -373,6 +437,8 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
 {
   space *s = &c->sp[sp];
   uint64_t base, delay, lost_before;
+  uint64_t first_lost = 0, last_lost = 0, first_pn = 0, last_pn = 0;
+  int any_lost = 0;
   size_t i, j = 0;
 
   s->loss_time = 0;
@@ -396,7 +462,17 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
           || (now > delay && p->time_us <= lost_before))
         {
           if (p->in_flight)
-            c->bytes_in_flight -= p->size;
+            {
+              c->bytes_in_flight -= p->size;
+              if (!any_lost)
+                {
+                  first_lost = p->time_us;
+                  first_pn = p->pn;
+                }
+              last_lost = p->time_us;
+              last_pn = p->pn;
+              any_lost = 1;
+            }
           if (p->ack_eliciting && s->ae_in_flight)
             s->ae_in_flight--;
           c->st.packets_lost++;
@@ -414,6 +490,26 @@ loss_detect (gq_conn *c, int sp, uint64_t now)
         }
     }
   s->n_sent = j;
+  if (any_lost)
+    {
+      cc_on_loss (c, last_lost, now);
+      /* Persistent congestion: losses spanning several probe timeouts
+         with nothing acknowledged in between.  */
+      if (c->have_rtt && last_lost > first_lost
+          && last_lost - first_lost
+             >= K_PERSISTENT_CONGESTION_THRESHOLD * conn_pto_base (c, SP_APP))
+        {
+          size_t k;
+          int between = 0;
+
+          for (k = 0; k < s->acked_pns.n; k++)
+            if (s->acked_pns.r[k].lo < last_pn
+                && s->acked_pns.r[k].hi > first_pn + 1)
+              between = 1;
+          if (!between)
+            cc_persistent (c);
+        }
+    }
 }
 
 uint64_t
@@ -530,5 +626,5 @@ on_loss_timeout (gq_conn *c, uint64_t now)
 int
 conn_can_send_ae (const gq_conn *c)
 {
-  return c->bytes_in_flight < MAX_BYTES_IN_FLIGHT;
+  return c->bytes_in_flight < c->cwnd;
 }

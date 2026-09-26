@@ -5,7 +5,8 @@ GNU QUIC NEWS - history of user-visible changes.
 ** Initial development.  No release has been made.
 ** QUIC connections (conn.h) and streams (stream.h, ranges.h): the
 handshake, packet number spaces, ACKs, RTT estimation, loss detection and
-probe timeouts (RFC 9002 without congestion control), stream and
+probe timeouts and NewReno congestion control with persistent
+congestion (RFC 9002), stream and
 connection flow control, connection IDs, key update, idle timeout,
 connection close and stateless reset; tested against quiche in both
 directions, with loss.
