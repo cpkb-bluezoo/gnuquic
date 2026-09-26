@@ -16,9 +16,10 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* A small TLS 1.3 client used to test GNU QUIC against independent
-   servers (OpenSSL, GnuTLS).  It is a test tool, not part of the library:
-   it does blocking socket I/O around gq_tlsconn.
+/* A small TLS 1.3 (or, with --tls12, TLS 1.2) client used to test GNU QUIC
+   against independent servers (OpenSSL, GnuTLS).  It is a test tool, not
+   part of the library: it does blocking socket I/O around gq_tlsconn or
+   gq_tls12conn.
 
    Usage: interop-client HOST PORT [options]
 
@@ -44,6 +45,7 @@
 #include <gnuquic/status.h>
 #include <gnuquic/policy.h>
 #include <gnuquic/tlsconn.h>
+#include <gnuquic/tls12conn.h>
 
 #include "interop-util.h"
 
@@ -54,8 +56,9 @@ struct opts
   size_t n_alpn;
   uint16_t groups[8];
   size_t n_groups;
-  uint16_t suites[4];
+  uint16_t suites[8];
   size_t n_suites;
+  int tls12;
   const char *send;		/* Request text, escapes decoded.  */
   const char *expect;
   const char *out;
@@ -167,6 +170,12 @@ suite_code (const char *n)
   if (!strcmp (n, "aes128")) return GQ_TLS_AES_128_GCM_SHA256;
   if (!strcmp (n, "aes256")) return GQ_TLS_AES_256_GCM_SHA384;
   if (!strcmp (n, "chacha")) return GQ_TLS_CHACHA20_POLY1305_SHA256;
+  if (!strcmp (n, "ecdsa-aes128")) return GQ_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+  if (!strcmp (n, "ecdsa-aes256")) return GQ_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+  if (!strcmp (n, "ecdsa-chacha")) return GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305;
+  if (!strcmp (n, "rsa-aes128")) return GQ_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+  if (!strcmp (n, "rsa-aes256")) return GQ_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384;
+  if (!strcmp (n, "rsa-chacha")) return GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305;
   return 0;
 }
 
@@ -219,6 +228,20 @@ alarm_handler (int sig)
   _exit (1);
 }
 
+/* One connection object of either version.  */
+struct conn
+{
+  gq_tlsconn *a;
+  gq_tls12conn *b;
+};
+
+#define C_START(c) (o.tls12 ? gq_tls12conn_start ((c).b) : gq_tlsconn_start ((c).a))
+#define C_RECV(c, d, n) (o.tls12 ? gq_tls12conn_receive ((c).b, d, n) \
+                                 : gq_tlsconn_receive ((c).a, d, n))
+#define C_SEND(c, d, n) (o.tls12 ? gq_tls12conn_send ((c).b, d, n) \
+                                 : gq_tlsconn_send ((c).a, d, n))
+#define C_CLOSE(c) (o.tls12 ? gq_tls12conn_close ((c).b) : gq_tlsconn_close ((c).a))
+
 /* One connection: connect, handshake, exchange, close.  Returns 0 for
    success, 2 for a TLS failure, 1 for I/O errors.  */
 static int
@@ -228,7 +251,7 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
   struct opts o = *o_;
   struct state st;
   gq_tlsconn_events ev;
-  gq_tlsconn *c;
+  struct conn c;
   uint8_t buf[16384];
   int sent_request = 0, r = 0, done = 0;
 
@@ -249,13 +272,15 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
   ev.ticket = xticket;
   ev.closed = xclosed;
   ev.rekey_records = o.rekey;
-  r = gq_tlsconn_client_new (&c, cfg, &ev);
+  memset (&c, 0, sizeof c);
+  r = o.tls12 ? gq_tls12conn_client_new (&c.b, cfg, &ev)
+              : gq_tlsconn_client_new (&c.a, cfg, &ev);
   if (r != GQ_OK)
     {
       printf ("result=fail reason=new status=%d\n", r);
       return 1;
     }
-  r = gq_tlsconn_start (c);
+  r = C_START (c);
 
   while (r == GQ_OK && !st.closed && !done)
     {
@@ -270,7 +295,7 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
             st.close_alert = -1;
           break;
         }
-      r = gq_tlsconn_receive (c, buf, (size_t) n);
+      r = C_RECV (c, buf, (size_t) n);
       if (r != GQ_OK)
         break;
 
@@ -283,7 +308,7 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
                   (int) st.info.alpn_len, (const char *) st.info.alpn,
                   st.info.client_auth_requested, st.info.client_auth_sent,
                   st.info.resumed);
-          if (o.key_update && gq_tlsconn_key_update (c, 1) != GQ_OK)
+          if (o.key_update && !o.tls12 && gq_tlsconn_key_update (c.a, 1) != GQ_OK)
             break;
           if (o.lines > 0)
             {
@@ -294,13 +319,12 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
                 {
                   int m = snprintf (line, sizeof line, "line-%d\n", k);
 
-                  if (gq_tlsconn_send (c, (const uint8_t *) line,
-                                       (size_t) m) != GQ_OK)
+                  if (C_SEND (c, (const uint8_t *) line, (size_t) m) != GQ_OK)
                     break;
                 }
             }
-          else if (gq_tlsconn_send (c, (const uint8_t *) o.send,
-                                    strlen (o.send)) != GQ_OK)
+          else if (C_SEND (c, (const uint8_t *) o.send, strlen (o.send))
+                   != GQ_OK)
             break;
         }
       if (sent_request && o.expect && st.rx_len >= o.min_bytes
@@ -329,7 +353,7 @@ run_once (struct opts *o_, const gq_tls_config *cfg, const gq_tls_session *resum
         }
     }
   if (done && !st.closed)
-    gq_tlsconn_close (c);
+    C_CLOSE (c);
 
   if (done)
     {
@@ -391,7 +415,7 @@ main (int argc, char **argv)
         {
           char *list = strdup (v), *tok, *save = NULL;
 
-          for (tok = strtok_r (list, ",", &save); tok && o.n_suites < 4;
+          for (tok = strtok_r (list, ",", &save); tok && o.n_suites < 8;
                tok = strtok_r (NULL, ",", &save))
             o.suites[o.n_suites++] = suite_code (tok);
         }
@@ -412,6 +436,7 @@ main (int argc, char **argv)
       else if (OPT ("--timeout")) o.timeout = atoi (v);
       else if (!strcmp (a, "--key-update")) o.key_update = 1;
       else if (!strcmp (a, "--twice")) o.twice = 1;
+      else if (!strcmp (a, "--tls12")) o.tls12 = 1;
       else
         {
           fprintf (stderr, "unknown option %s\n", a);
@@ -455,7 +480,7 @@ main (int argc, char **argv)
     }
   cfg.alpn = alpn;
   cfg.n_alpn = o.n_alpn;
-  if (o.n_groups)
+  if (o.n_groups && !o.tls12)
     {
       cfg.groups = o.groups;
       cfg.n_groups = o.n_groups;

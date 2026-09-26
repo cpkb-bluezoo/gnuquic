@@ -23,7 +23,8 @@
    CBC and other non-AEAD suites, static RSA key transport, RSA-PSS-less
    RSA signatures in TLS 1.3, SHA-1 signatures, renegotiation,
    compression, finite-field DH groups, export ciphers) is not a
-   configuration option; it is not implemented.  The "Security policy" chapter of the manual
+   configuration option; it is not implemented.  TLS 1.2 is a narrower
+   profile again: ECDHE on secp256r1 only, and no Ed25519 or ML-DSA.  The "Security policy" chapter of the manual
    gives the reasoning behind each choice.
 
    Values are the IANA registry code points.  */
@@ -70,7 +71,7 @@ enum gq_tls12_suite
   GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305    = 0xcca8
 };
 
-/* Key exchange groups.  Hybrid post-quantum groups (RFC 10024 /
+/* Key exchange groups.  TLS 1.2 / DTLS 1.2 use secp256r1 only.  Hybrid post-quantum groups (RFC 10024 /
    draft-ietf-tls-ecdhe-mlkem) come first in the default preference.  */
 enum gq_group
 {
@@ -87,6 +88,11 @@ enum gq_sigscheme
 {
   GQ_SIG_ECDSA_SECP256R1_SHA256 = 0x0403,
   GQ_SIG_ECDSA_SECP384R1_SHA384 = 0x0503,
+  /* TLS 1.2 / DTLS 1.2 only: RSA PKCS#1 v1.5 with SHA-2 (RFC 5246).
+     The TLS 1.2 engine verifies RSA-PSS but signs RSA with these.  */
+  GQ_SIG_RSA_PKCS1_SHA256       = 0x0401,
+  GQ_SIG_RSA_PKCS1_SHA384       = 0x0501,
+  GQ_SIG_RSA_PKCS1_SHA512       = 0x0601,
   GQ_SIG_RSA_PSS_RSAE_SHA256    = 0x0804,
   GQ_SIG_RSA_PSS_RSAE_SHA384    = 0x0805,
   GQ_SIG_RSA_PSS_RSAE_SHA512    = 0x0806,
@@ -97,17 +103,22 @@ enum gq_sigscheme
 };
 
 /* Membership tests: 1 if the value is permitted for VERSION, else 0.
+   gq_policy_allows_group and gq_policy_default_groups and _sigschemes
+   describe TLS 1.3 / DTLS 1.3; the _for variants take a version.
    Unknown code points are never permitted.  */
 int gq_policy_allows_version (unsigned version);
 int gq_policy_allows_suite (unsigned version, unsigned suite);
 int gq_policy_allows_group (unsigned group);
+int gq_policy_allows_group_for (unsigned version, unsigned group);
 int gq_policy_allows_sigscheme (unsigned version, unsigned scheme);
 
 /* Default preference-ordered lists.  Each returns a static array and
    stores its length in *N.  */
 const uint16_t *gq_policy_default_suites (unsigned version, size_t *n);
 const uint16_t *gq_policy_default_groups (size_t *n);
+const uint16_t *gq_policy_default_groups_for (unsigned version, size_t *n);
 const uint16_t *gq_policy_default_sigschemes (size_t *n);
+const uint16_t *gq_policy_default_sigschemes_for (unsigned version, size_t *n);
 
 #ifdef __cplusplus
 }

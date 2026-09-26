@@ -3,3 +3,6 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** TLS 1.2 (tls12.h, tls12conn.h) with the same restricted profile as
+Gumdrop and Hopf: ECDHE on secp256r1 and AEAD suites only, mandatory
+extended master secret and renegotiation indication, ticket resumption.

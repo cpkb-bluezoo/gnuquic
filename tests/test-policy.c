@@ -57,6 +57,20 @@ main (void)
   CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_3, 0x0201));	/* RSA SHA-1.  */
   CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_3, 0x0401));	/* PKCS1 SHA256.  */
 
+  /* TLS 1.2 is narrower on groups and signatures, wider on RSA.  */
+  CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_RSA_PKCS1_SHA256));
+  CHECK (gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_RSA_PKCS1_SHA384));
+  CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_ECDSA_SECP256R1_SHA256));
+  CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_2, GQ_SIG_ED25519));
+  CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_2, 0x0201));	/* RSA SHA-1.  */
+  CHECK (!gq_policy_allows_sigscheme (GQ_TLS_1_2, 0x0203));	/* ECDSA SHA-1.  */
+  CHECK (gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_SECP256R1));
+  CHECK (!gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_X25519));
+  CHECK (!gq_policy_allows_group_for (GQ_TLS_1_2, GQ_GROUP_SECP384R1));
+  CHECK (!gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_X25519_MLKEM768));
+  CHECK (gq_policy_allows_group_for (GQ_TLS_1_3, GQ_GROUP_X25519));
+  CHECK (!gq_policy_allows_group_for (0x0301, GQ_GROUP_SECP256R1));
+
   /* Every default is itself permitted, and PQ hybrids lead.  */
   l = gq_policy_default_groups (&n);
   CHECK (n > 0 && l[0] == GQ_GROUP_X25519_MLKEM768);
@@ -68,6 +82,12 @@ main (void)
   l = gq_policy_default_suites (GQ_DTLS_1_2, &n);
   for (i = 0; i < n; i++)
     CHECK (gq_policy_allows_suite (GQ_DTLS_1_2, l[i]));
+  l = gq_policy_default_sigschemes_for (GQ_TLS_1_2, &n);
+  CHECK (n > 0);
+  for (i = 0; i < n; i++)
+    CHECK (gq_policy_allows_sigscheme (GQ_TLS_1_2, l[i]));
+  l = gq_policy_default_groups_for (GQ_TLS_1_2, &n);
+  CHECK (n == 1 && l[0] == GQ_GROUP_SECP256R1);
   l = gq_policy_default_suites (0x0301, &n);
   CHECK (l == NULL && n == 0);
 

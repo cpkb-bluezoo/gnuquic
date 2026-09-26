@@ -1,6 +1,7 @@
 #!/bin/sh
-# Interoperability tests: the GNU QUIC TLS 1.3 client against OpenSSL's
-# s_server and GnuTLS's gnutls-serv.  Skipped (exit 77) when neither server
+# GQ_INTEROP_FILTER=text runs only the scenarios whose names contain it.
+# Interoperability tests: the GNU QUIC TLS 1.3 and TLS 1.2 clients and servers
+# against OpenSSL's s_server/s_client and GnuTLS's gnutls-serv/gnutls-cli.  Skipped (exit 77) when neither server
 # is installed or GQ_NO_INTEROP is set.
 #
 # Copyright (C) 2026 Chris Burdess <dog@gnu.org>
@@ -110,7 +111,8 @@ start_server ()
   kind=$1; port=$2; shift 2
   case $kind in
     openssl)
-      "$OPENSSL" s_server -accept "$port" -tls1_3 -quiet "$@" \
+      case " $* " in *" -tls1_2 "*|*" -tls1_3 "*) proto= ;; *) proto=-tls1_3 ;; esac
+      "$OPENSSL" s_server -accept "$port" $proto -quiet "$@" \
         >server.log 2>&1 &
       ;;
     gnutls)
@@ -142,6 +144,7 @@ check_output ()
 scenario ()
 {
   name=$1; kind=$2; sargs=$3; cargs=$4; want=$5; shift 5
+  case $name in *"${GQ_INTEROP_FILTER:-}"*) ;; *) return ;; esac
   runs=$((runs + 1))
   # Picking a free port and starting the server is racy (another process
   # may take the port in between), so retry with a fresh port.
@@ -244,6 +247,58 @@ if "$OPENSSL" s_server -help >/dev/null 2>&1; then
     "suite=0x1303.*resumed=1"
 fi
 
+# ------------------------------------------------- TLS 1.2 vs OpenSSL servers
+if "$OPENSSL" s_server -help >/dev/null 2>&1; then
+  O12="-tls1_2 -cert ec.pem -key ec.key -www"
+  R12="-tls1_2 -cert rsa.pem -key rsa.key -www"
+  C12="--tls12 --expect $HTTP200"
+  scenario "tls12/openssl: default" openssl "$O12" "$C12" ok \
+    "group=0x0017" "resumed=0" "result=ok"
+  scenario "tls12/openssl: ECDHE-ECDSA-AES128-GCM-SHA256" openssl \
+    "$O12 -cipher ECDHE-ECDSA-AES128-GCM-SHA256" "$C12 --suites ecdsa-aes128" ok "suite=0xc02b"
+  scenario "tls12/openssl: ECDHE-ECDSA-AES256-GCM-SHA384" openssl \
+    "$O12 -cipher ECDHE-ECDSA-AES256-GCM-SHA384" "$C12 --suites ecdsa-aes256" ok "suite=0xc02c"
+  scenario "tls12/openssl: ECDHE-ECDSA-CHACHA20-POLY1305" openssl \
+    "$O12 -cipher ECDHE-ECDSA-CHACHA20-POLY1305" "$C12 --suites ecdsa-chacha" ok "suite=0xcca9"
+  scenario "tls12/openssl: ECDHE-RSA-AES128-GCM-SHA256" openssl \
+    "$R12 -cipher ECDHE-RSA-AES128-GCM-SHA256" "$C12 --suites rsa-aes128" ok "suite=0xc02f"
+  scenario "tls12/openssl: ECDHE-RSA-AES256-GCM-SHA384" openssl \
+    "$R12 -cipher ECDHE-RSA-AES256-GCM-SHA384" "$C12 --suites rsa-aes256" ok "suite=0xc030"
+  scenario "tls12/openssl: ECDHE-RSA-CHACHA20-POLY1305" openssl \
+    "$R12 -cipher ECDHE-RSA-CHACHA20-POLY1305" "$C12 --suites rsa-chacha" ok "suite=0xcca8"
+  scenario "tls12/openssl: ALPN" openssl "$O12 -alpn http/1.1,h2" \
+    "$C12 --alpn h2 --alpn http/1.1" ok "alpn=http/1.1"
+  scenario "tls12/openssl: client certificate (ECDSA)" openssl \
+    "$O12 -Verify 1 -CAfile ca.pem" "$C12 --cert cli.pem --key cli.key" ok \
+    "client_auth_requested=1" "client_auth_sent=1"
+  scenario "tls12/openssl: client certificate required but not sent" openssl \
+    "$O12 -Verify 1 -verify_return_error -CAfile ca.pem" "$C12" fail \
+    "result=fail" "alert=40"
+  scenario "tls12/openssl: untrusted server certificate" openssl \
+    "-tls1_2 -cert bad.pem -key bad.key -www" "$C12" fail "alert=48"
+  scenario "tls12/openssl: wrong host name" openssl "$O12" \
+    "$C12 --sni nomatch.test" fail "alert=42"
+  scenario "tls12/openssl: 200 KB download over many records" openssl \
+    "-tls1_2 -cert ec.pem -key ec.key -WWW" \
+    "--tls12 --path /www/big --expect 0 --min-bytes $BIGSIZE --out got" ok "result=ok"
+  if [ -f got ]; then
+    tail -c "$BIGSIZE" got | cmp -s - big && echo "PASS tls12/openssl: downloaded data identical" \
+      || { echo "FAIL tls12/openssl: downloaded data differs"; fails=$((fails + 1)); }
+    runs=$((runs + 1)); rm -f got
+  fi
+  scenario "tls12/openssl: ticket resumption" openssl "$O12" \
+    "$C12 --twice" ok "resumed=0" "resumed=1"
+  scenario "tls12/openssl: ticket resumption, RSA and ChaCha20" openssl \
+    "$R12 -cipher ECDHE-RSA-CHACHA20-POLY1305" "$C12 --twice" ok "suite=0xcca8.*resumed=1"
+  # What we refuse.
+  scenario "tls12/openssl: CBC-only server is refused" openssl \
+    "$R12 -cipher AES128-SHA:ECDHE-RSA-AES128-SHA" "$C12" fail "result=fail"
+  scenario "tls12/openssl: server without extended master secret is refused" openssl \
+    "$O12 -no_ems" "$C12" fail "alert=40"
+  scenario "tls12/openssl: TLS 1.3-only server" openssl \
+    "-tls1_3 -cert ec.pem -key ec.key -www" "$C12" fail "result=fail"
+fi
+
 # ---------------------------------------------------------------- GnuTLS
 if [ -n "$GNUTLS_SERV" ] && "$GNUTLS_SERV" --version >/dev/null 2>&1; then
   GS="--x509certfile=ec.pem --x509keyfile=ec.key --http"
@@ -278,6 +333,27 @@ if [ -n "$GNUTLS_SERV" ] && "$GNUTLS_SERV" --version >/dev/null 2>&1; then
     "--key-update --expect $HTTP200" ok "result=ok"
   scenario "gnutls: session resumption with a stored ticket" gnutls "$GS --priority=$P13" \
     "--twice --expect $HTTP200" ok "resumed=0" "resumed=1"
+
+  P12="NORMAL:-VERS-ALL:+VERS-TLS1.2"
+  scenario "tls12/gnutls: default" gnutls "$GS --priority=$P12" \
+    "--tls12 --expect $HTTP200" ok "result=ok" "resumed=0"
+  scenario "tls12/gnutls: RSA certificate" gnutls \
+    "--x509certfile=rsa.pem --x509keyfile=rsa.key --http --priority=$P12" \
+    "--tls12 --expect $HTTP200" ok "result=ok"
+  scenario "tls12/gnutls: ChaCha20-Poly1305" gnutls \
+    "$GS --priority=$P12:-CIPHER-ALL:+CHACHA20-POLY1305" \
+    "--tls12 --expect $HTTP200" ok "suite=0xcca9"
+  scenario "tls12/gnutls: AES-256-GCM" gnutls \
+    "$GS --priority=$P12:-CIPHER-ALL:+AES-256-GCM" \
+    "--tls12 --expect $HTTP200" ok "suite=0xc02c"
+  scenario "tls12/gnutls: client certificate" gnutls \
+    "$GS --priority=$P12 --require-client-cert --x509cafile=ca.pem" \
+    "--tls12 --cert cli.pem --key cli.key --expect $HTTP200" ok "client_auth_sent=1"
+  scenario "tls12/gnutls: untrusted server certificate" gnutls \
+    "--x509certfile=bad.pem --x509keyfile=bad.key --http --priority=$P12" \
+    "--tls12 --expect $HTTP200" fail "alert=48"
+  scenario "tls12/gnutls: ticket resumption" gnutls "$GS --priority=$P12" \
+    "--tls12 --twice --expect $HTTP200" ok "resumed=0" "resumed=1"
 fi
 
 # ---------------------------------------------------------------- our server
@@ -288,6 +364,7 @@ fi
 server_scenario ()
 {
   name=$1; ckind=$2; sargs=$3; cargs=$4; want=$5; shift 5
+  case $name in *"${GQ_INTEROP_FILTER:-}"*) ;; *) return ;; esac
   runs=$((runs + 1))
   attempt=0
   started=0
@@ -318,7 +395,7 @@ server_scenario ()
   case $ckind in
     openssl)
       # -tls1_3 unless the scenario asks for -tls1_2.
-      case " $cargs " in *" -tls1_2 "*) proto= ;; *) proto=-tls1_3 ;; esac
+      case " $cargs " in *" -tls1_2 "*|*" -tls1_3 "*) proto= ;; *) proto=-tls1_3 ;; esac
       # shellcheck disable=SC2086
       (printf 'hello\n'; sleep 1) | "$OPENSSL" s_client -connect "127.0.0.1:$port" \
         $proto -CAfile ca.pem -servername example.test \
@@ -363,6 +440,7 @@ server_scenario ()
 }
 
 SC="--cert ec.pem --key ec.key"
+S12="$SC --tls12"
 if "$OPENSSL" s_client -help >/dev/null 2>&1; then
   server_scenario "server/openssl: default (hybrid X25519MLKEM768)" openssl "$SC" "" ok \
     "group=0x11ec" "hrr=0" "sni=example.test" "result=ok"
@@ -403,6 +481,37 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "$SC" "-tls1_2" fail "alert=70"
   server_scenario "server/openssl: server-initiated rekey and KeyUpdate" openssl \
     "$SC --rekey 2 --key-update 1" "" ok "result=ok"
+  server_scenario "server12/openssl: default" openssl "$S12" "-tls1_2" ok \
+    "result=ok" "sni=example.test" "group=0x0017"
+  server_scenario "server12/openssl: ECDHE-ECDSA-CHACHA20-POLY1305" openssl "$S12" \
+    "-tls1_2 -cipher ECDHE-ECDSA-CHACHA20-POLY1305" ok "suite=0xcca9"
+  server_scenario "server12/openssl: ECDHE-ECDSA-AES128-GCM-SHA256" openssl "$S12" \
+    "-tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256" ok "suite=0xc02b"
+  server_scenario "server12/openssl: server preference picks AES-256-GCM" openssl "$S12" \
+    "-tls1_2" ok "suite=0xc02c"
+  server_scenario "server12/openssl: RSA certificate (ECDHE-RSA-AES128-GCM-SHA256)" openssl \
+    "--tls12 --cert rsa.pem --key rsa.key" "-tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256" ok "suite=0xc02f"
+  server_scenario "server12/openssl: RSA certificate (ChaCha20-Poly1305)" openssl \
+    "--tls12 --cert rsa.pem --key rsa.key" "-tls1_2 -cipher ECDHE-RSA-CHACHA20-POLY1305" ok "suite=0xcca8"
+  server_scenario "server12/openssl: SNI selects the certificate" openssl \
+    "$S12 --sni example.test=ec.pem:ec.key --sni other.test=rsa.pem:rsa.key" \
+    "-tls1_2 -servername other.test -verify_hostname other.test" ok "sni=other.test" "suite=0xc030"
+  server_scenario "server12/openssl: ALPN by server preference" openssl \
+    "$S12 --alpn h2 --alpn http/1.1" "-tls1_2 -alpn http/1.1,h2" ok "alpn=h2"
+  server_scenario "server12/openssl: client certificate required" openssl \
+    "$S12 --client-auth required --ca ca.pem" "-tls1_2 -cert cli.pem -key cli.key" ok "client_auth=1"
+  server_scenario "server12/openssl: client certificate optional, absent" openssl \
+    "$S12 --client-auth optional --ca ca.pem" "-tls1_2" ok "client_auth_requested=1" "client_auth=0"
+  server_scenario "server12/openssl: client certificate required, absent" openssl \
+    "$S12 --client-auth required --ca ca.pem" "-tls1_2" fail "alert=40"
+  server_scenario "server12/openssl: client certificate from untrusted CA" openssl \
+    "$S12 --client-auth required --ca ca.pem" "-tls1_2 -cert badcli.pem -key badcli.key" fail "alert=48"
+  server_scenario "server12/openssl: TLS 1.3-only client is refused" openssl \
+    "$S12" "-tls1_3" fail "alert=70"
+  server_scenario "server12/openssl: client without extended master secret is refused" openssl \
+    "$S12" "-tls1_2 -no_ems" fail "alert=40"
+  server_scenario "server12/openssl: CBC-only client is refused" openssl \
+    "$S12" "-tls1_2 -cipher ECDHE-ECDSA-AES128-SHA" fail "alert=40"
 fi
 
 if [ -n "$GNUTLS_SERV" ]; then
@@ -424,6 +533,17 @@ if [ -n "${GNUTLS_CLI:-}" ] && "$GNUTLS_CLI" --version >/dev/null 2>&1; then
     "--priority=$P13 --x509certfile=cli.pem --x509keyfile=cli.key" ok "client_auth=1"
   server_scenario "server/gnutls: TLS 1.2 client is refused" gnutls "$SC" \
     "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.2" fail "alert=70"
+  P12="NORMAL:-VERS-ALL:+VERS-TLS1.2"
+  server_scenario "server12/gnutls: default" gnutls "$S12" "--priority=$P12" ok "result=ok" "sni=example.test"
+  server_scenario "server12/gnutls: ChaCha20-Poly1305" gnutls "$S12" \
+    "--priority=$P12:-CIPHER-ALL:+CHACHA20-POLY1305" ok "suite=0xcca9"
+  server_scenario "server12/gnutls: RSA certificate" gnutls "--tls12 --cert rsa.pem --key rsa.key" \
+    "--priority=$P12" ok "result=ok"
+  server_scenario "server12/gnutls: client certificate" gnutls \
+    "$S12 --client-auth required --ca ca.pem" \
+    "--priority=$P12 --x509certfile=cli.pem --x509keyfile=cli.key" ok "client_auth=1"
+  server_scenario "server12/gnutls: TLS 1.3-only client is refused" gnutls "$S12" \
+    "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.3" fail "alert=70"
 fi
 
 # ---------------------------------------------------------------- resumption
@@ -454,6 +574,7 @@ start_ours ()
 resume_scenario ()
 {
   name=$1; ckind=$2; sargs=$3; cargs=$4; shift 4
+  case $name in *"${GQ_INTEROP_FILTER:-}"*) ;; *) return ;; esac
   runs=$((runs + 1))
   # OpenSSL's client does not close on stdin EOF, so the server closes
   # after echoing the greeting; gnutls-cli ends its connections itself.
@@ -466,11 +587,12 @@ resume_scenario ()
   rm -f sess.pem
   case $ckind in
     openssl)
+      case " $cargs " in *" -tls1_2 "*|*" -tls1_3 "*) proto= ;; *) proto=-tls1_3 ;; esac
       for pass in 1 2; do
         if [ $pass = 1 ]; then sess="-sess_out sess.pem"; else sess="-sess_in sess.pem"; fi
         # shellcheck disable=SC2086
         (printf 'hello\n'; sleep 1) | "$OPENSSL" s_client -connect "127.0.0.1:$port" \
-          -tls1_3 -CAfile ca.pem -servername example.test \
+          $proto -CAfile ca.pem -servername example.test \
           -verify_hostname example.test -verify_return_error -quiet $sess $cargs \
           >cli$pass.out 2>cli$pass.err
       done
@@ -513,7 +635,18 @@ if "$OPENSSL" s_client -help >/dev/null 2>&1; then
     "$SC --client-auth required --ca ca.pem" "-cert cli.pem -key cli.key" \
     "client_auth=1.*resumed=0" "client_auth=1.*resumed=1"
 fi
+if "$OPENSSL" s_client -help >/dev/null 2>&1; then
+  resume_scenario "server12/openssl: ticket resumption" openssl "$SC --tls12" "-tls1_2" \
+    "resumed=0" "resumed=1" "result=ok"
+  resume_scenario "server12/openssl: ticket resumption, ChaCha20-Poly1305" openssl \
+    "$SC --tls12" "-tls1_2 -cipher ECDHE-ECDSA-CHACHA20-POLY1305" "suite=0xcca9.*resumed=1"
+  resume_scenario "server12/openssl: ticket resumption keeps client authentication" openssl \
+    "$SC --tls12 --client-auth required --ca ca.pem" "-tls1_2 -cert cli.pem -key cli.key" \
+    "client_auth=1.*resumed=0" "client_auth=1.*resumed=1"
+fi
 if [ -n "${GNUTLS_CLI:-}" ] && "$GNUTLS_CLI" --version >/dev/null 2>&1; then
+  resume_scenario "server12/gnutls: ticket resumption (gnutls-cli --resume)" gnutls "$SC --tls12" \
+    "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.2" "resumed=1"
   resume_scenario "server/gnutls: resumption (gnutls-cli --resume)" gnutls "$SC" \
     "--priority=NORMAL:-VERS-ALL:+VERS-TLS1.3" "resumed=1"
 fi

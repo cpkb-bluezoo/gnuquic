@@ -46,7 +46,8 @@ main (void)
 static const unsigned all_schemes[] = {
   GQ_SIG_ECDSA_SECP256R1_SHA256, GQ_SIG_ECDSA_SECP384R1_SHA384,
   GQ_SIG_RSA_PSS_RSAE_SHA256, GQ_SIG_RSA_PSS_RSAE_SHA384,
-  GQ_SIG_RSA_PSS_RSAE_SHA512, GQ_SIG_ED25519
+  GQ_SIG_RSA_PSS_RSAE_SHA512, GQ_SIG_ED25519,
+  GQ_SIG_RSA_PKCS1_SHA256, GQ_SIG_RSA_PKCS1_SHA384, GQ_SIG_RSA_PKCS1_SHA512
 };
 
 static const char message[] = "TLS 1.3, server CertificateVerify";
@@ -130,6 +131,10 @@ test_key (enum tst_key kind, const unsigned *fit, size_t nfit)
   /* A signature made under one RSA-PSS hash does not verify as another.  */
   if (kind == TST_RSA2048)
     {
+      CHECK_EQ (gq_privkey_sign (priv, GQ_SIG_RSA_PKCS1_SHA256, message,
+                                 sizeof message, sig, sizeof sig, &n), GQ_OK);
+      CHECK_EQ (gq_pubkey_verify (pub, GQ_SIG_RSA_PKCS1_SHA384, message,
+                                  sizeof message, sig, n), GQ_ERR_CRYPTO);
       CHECK_EQ (gq_privkey_sign (priv, GQ_SIG_RSA_PSS_RSAE_SHA256, message,
                                  sizeof message, sig, sizeof sig, &n), GQ_OK);
       CHECK_EQ (gq_pubkey_verify (pub, GQ_SIG_RSA_PSS_RSAE_SHA384, message,
@@ -155,8 +160,8 @@ test_policy_and_errors (void)
     return;
 
   /* Schemes outside the policy.  */
-  CHECK_EQ (gq_privkey_sign (priv, 0x0401, message, 4, sig, sizeof sig, &n),
-            GQ_ERR_UNSUPPORTED);		/* RSA PKCS#1 SHA-256 */
+  CHECK_EQ (gq_privkey_sign (priv, 0x0201, message, 4, sig, sizeof sig, &n),
+            GQ_ERR_UNSUPPORTED);		/* RSA PKCS#1 SHA-1 */
   CHECK_EQ (gq_privkey_sign (priv, 0x0203, message, 4, sig, sizeof sig, &n),
             GQ_ERR_UNSUPPORTED);		/* ECDSA SHA-1 */
   CHECK_EQ (gq_pubkey_verify (pub, 0x0201, message, 4, sig, 64),
@@ -233,12 +238,15 @@ main (void)
   static const unsigned ed[] = { GQ_SIG_ED25519 };
   static const unsigned rsa[] = { GQ_SIG_RSA_PSS_RSAE_SHA256,
                                   GQ_SIG_RSA_PSS_RSAE_SHA384,
-                                  GQ_SIG_RSA_PSS_RSAE_SHA512 };
+                                  GQ_SIG_RSA_PSS_RSAE_SHA512,
+                                  GQ_SIG_RSA_PKCS1_SHA256,
+                                  GQ_SIG_RSA_PKCS1_SHA384,
+                                  GQ_SIG_RSA_PKCS1_SHA512 };
 
   test_key (TST_ECDSA256, p256, 1);
   test_key (TST_ECDSA384, p384, 1);
   test_key (TST_ED25519, ed, 1);
-  test_key (TST_RSA2048, rsa, 3);
+  test_key (TST_RSA2048, rsa, 6);
   test_policy_and_errors ();
   test_weak_rsa ();
   TST_DONE ();

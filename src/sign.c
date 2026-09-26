@@ -59,6 +59,9 @@ sign_algo (unsigned scheme)
     {
     case GQ_SIG_ECDSA_SECP256R1_SHA256: return GNUTLS_SIGN_ECDSA_SECP256R1_SHA256;
     case GQ_SIG_ECDSA_SECP384R1_SHA384: return GNUTLS_SIGN_ECDSA_SECP384R1_SHA384;
+    case GQ_SIG_RSA_PKCS1_SHA256:       return GNUTLS_SIGN_RSA_SHA256;
+    case GQ_SIG_RSA_PKCS1_SHA384:       return GNUTLS_SIGN_RSA_SHA384;
+    case GQ_SIG_RSA_PKCS1_SHA512:       return GNUTLS_SIGN_RSA_SHA512;
     case GQ_SIG_RSA_PSS_RSAE_SHA256:    return GNUTLS_SIGN_RSA_PSS_RSAE_SHA256;
     case GQ_SIG_RSA_PSS_RSAE_SHA384:    return GNUTLS_SIGN_RSA_PSS_RSAE_SHA384;
     case GQ_SIG_RSA_PSS_RSAE_SHA512:    return GNUTLS_SIGN_RSA_PSS_RSAE_SHA512;
@@ -81,6 +84,9 @@ key_fits (unsigned pk, unsigned bits, unsigned scheme)
       return pk == GNUTLS_PK_ECDSA && bits == 256;
     case GQ_SIG_ECDSA_SECP384R1_SHA384:
       return pk == GNUTLS_PK_ECDSA && bits == 384;
+    case GQ_SIG_RSA_PKCS1_SHA256:
+    case GQ_SIG_RSA_PKCS1_SHA384:
+    case GQ_SIG_RSA_PKCS1_SHA512:
     case GQ_SIG_RSA_PSS_RSAE_SHA256:
     case GQ_SIG_RSA_PSS_RSAE_SHA384:
     case GQ_SIG_RSA_PSS_RSAE_SHA512:
@@ -96,6 +102,15 @@ key_fits (unsigned pk, unsigned bits, unsigned scheme)
     default:
       return 0;
     }
+}
+
+/* A scheme some TLS generation allows (the callers, the engines, apply the
+   per-version lists; this layer only refuses what no version permits).  */
+static int
+allowed_any (unsigned scheme)
+{
+  return gq_policy_allows_sigscheme (GQ_TLS_1_3, scheme)
+    || gq_policy_allows_sigscheme (GQ_TLS_1_2, scheme);
 }
 
 static int
@@ -122,7 +137,7 @@ gq_sigscheme_available (unsigned scheme)
   gnutls_x509_privkey_t k;
   int r;
 
-  if (!gq_policy_allows_sigscheme (GQ_TLS_1_3, scheme))
+  if (!allowed_any (scheme))
     return 0;
   if (!is_mldsa (scheme))
     return 1;
@@ -207,7 +222,7 @@ gq_pubkey_verify (const gq_pubkey *k, unsigned scheme, const void *data,
   if (k == NULL || (data == NULL && len > 0) || sig == NULL
       || len > (unsigned) -1 || sig_len > (unsigned) -1)
     return GQ_ERR_INVAL;
-  if (!gq_policy_allows_sigscheme (GQ_TLS_1_3, scheme))
+  if (!allowed_any (scheme))
     return GQ_ERR_UNSUPPORTED;
   if (!key_fits (k->pk, k->bits, scheme))
     return GQ_ERR_CRYPTO;
@@ -320,7 +335,7 @@ gq_privkey_free (gq_privkey *k)
 int
 gq_privkey_supports (const gq_privkey *k, unsigned scheme)
 {
-  return k != NULL && gq_policy_allows_sigscheme (GQ_TLS_1_3, scheme)
+  return k != NULL && allowed_any (scheme)
     && key_fits (k->pk, k->bits, scheme);
 }
 
@@ -334,7 +349,7 @@ gq_privkey_sign (const gq_privkey *k, unsigned scheme, const void *data,
   if (k == NULL || (data == NULL && len > 0) || sig == NULL
       || sig_len == NULL || len > (unsigned) -1)
     return GQ_ERR_INVAL;
-  if (!gq_policy_allows_sigscheme (GQ_TLS_1_3, scheme))
+  if (!allowed_any (scheme))
     return GQ_ERR_UNSUPPORTED;
   if (!key_fits (k->pk, k->bits, scheme))
     return GQ_ERR_CRYPTO;

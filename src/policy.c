@@ -63,6 +63,24 @@ static const uint16_t sigs[] = {
   GQ_SIG_RSA_PSS_RSAE_SHA512
 };
 
+/* TLS 1.2 / DTLS 1.2: ECDHE on secp256r1 only.  */
+static const uint16_t groups12[] = {
+  GQ_GROUP_SECP256R1
+};
+
+/* TLS 1.2 / DTLS 1.2 signatures.  RSA-PSS is accepted from peers, but the
+   engine signs RSA with PKCS#1 v1.5 (see tls12.c).  */
+static const uint16_t sigs12[] = {
+  GQ_SIG_ECDSA_SECP256R1_SHA256,
+  GQ_SIG_ECDSA_SECP384R1_SHA384,
+  GQ_SIG_RSA_PSS_RSAE_SHA256,
+  GQ_SIG_RSA_PSS_RSAE_SHA384,
+  GQ_SIG_RSA_PSS_RSAE_SHA512,
+  GQ_SIG_RSA_PKCS1_SHA256,
+  GQ_SIG_RSA_PKCS1_SHA384,
+  GQ_SIG_RSA_PKCS1_SHA512
+};
+
 static int
 is_13 (unsigned version)
 {
@@ -114,6 +132,29 @@ gq_policy_allows_suite (unsigned version, unsigned suite)
 }
 
 const uint16_t *
+gq_policy_default_groups_for (unsigned version, size_t *n)
+{
+  if (!gq_policy_allows_version (version))
+    {
+      *n = 0;
+      return NULL;
+    }
+  if (is_13 (version))
+    return gq_policy_default_groups (n);
+  *n = ARRAY_LEN (groups12);
+  return groups12;
+}
+
+int
+gq_policy_allows_group_for (unsigned version, unsigned group)
+{
+  size_t n;
+  const uint16_t *l = gq_policy_default_groups_for (version, &n);
+
+  return l != NULL && in_list (l, n, group);
+}
+
+const uint16_t *
 gq_policy_default_groups (size_t *n)
 {
   *n = ARRAY_LEN (groups);
@@ -133,14 +174,25 @@ gq_policy_default_sigschemes (size_t *n)
   return sigs;
 }
 
+const uint16_t *
+gq_policy_default_sigschemes_for (unsigned version, size_t *n)
+{
+  if (!gq_policy_allows_version (version))
+    {
+      *n = 0;
+      return NULL;
+    }
+  if (is_13 (version))
+    return gq_policy_default_sigschemes (n);
+  *n = ARRAY_LEN (sigs12);
+  return sigs12;
+}
+
 int
 gq_policy_allows_sigscheme (unsigned version, unsigned scheme)
 {
-  if (!gq_policy_allows_version (version)
-      || !in_list (sigs, ARRAY_LEN (sigs), scheme))
-    return 0;
-  /* ML-DSA is defined for TLS 1.3 / DTLS 1.3 only.  */
-  if (scheme >= GQ_SIG_MLDSA44 && scheme <= GQ_SIG_MLDSA87)
-    return is_13 (version);
-  return 1;
+  size_t n;
+  const uint16_t *l = gq_policy_default_sigschemes_for (version, &n);
+
+  return l != NULL && in_list (l, n, scheme);
 }
