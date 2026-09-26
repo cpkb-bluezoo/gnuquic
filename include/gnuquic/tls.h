@@ -265,6 +265,10 @@ typedef struct gq_tls_config
      callback at GQ_LEVEL_EARLY; the amount is limited by the session's
      max_early_data.  */
   int early_data;
+  /* DTLS 1.3 (RFC 9147): version 0xfefc, the legacy_cookie field, no
+     compatibility session ID, "dtls13" HKDF labels.  Refused together with
+     quic and early_data.  Normally set by gq_dtls, not by applications.  */
+  int dtls;
   /* Largest handshake message body accepted.  0 selects 65536.  */
   size_t max_message_len;
   gq_tls_hooks hooks;
@@ -348,10 +352,41 @@ typedef struct gq_tls_server_config
                      gq_session_state *state);
   void *psk_user;
   size_t max_message_len;
+  /* DTLS 1.3 server: as gq_tls_config.dtls.  Refused with quic; early
+     data is off and hello_retry_cookie is ignored (the address-bound
+     stateless cookie of dtlscookie.h is used instead).  */
+  int dtls;
   gq_tls_hooks hooks;
 } gq_tls_server_config;
 
+/* What a DTLS server that answered ClientHello1 statelessly (with a
+   cookie) needs to continue when ClientHello2 arrives; see dtlscookie.h.
+   HRR is the exact HelloRetryRequest message that was sent.  */
+#define GQ_DTLS_HRR_MAX 320
+typedef struct gq_tls_dtls_prime
+{
+  uint16_t suite;			/* Selected in the HelloRetryRequest.  */
+  uint16_t group;			/* Group it asked for, or 0.  */
+  uint8_t ch1_hash[GQ_MAX_HASH_LEN];	/* Hash of ClientHello1, by suite.  */
+  uint8_t hrr[GQ_DTLS_HRR_MAX];		/* The message as sent (TLS form).  */
+  size_t hrr_len;
+} gq_tls_dtls_prime;
+
+
 typedef struct gq_tls gq_tls;
+
+/* Server, DTLS only, before the first gq_tls_feed: continue a handshake
+   whose ClientHello1 and HelloRetryRequest were handled statelessly.  The
+   transcript is restarted from message_hash (ClientHello1) and the
+   retry, as if this engine had sent it.  ClientHello2 is then fed as the
+   first message; it must pick the suite of the prime, and cannot cause a
+   second retry.  */
+int gq_tls_server_prime (gq_tls *tls, const gq_tls_dtls_prime *prime);
+
+/* DTLS: tell the engine a KeyUpdate of ours is unacknowledged.  While set,
+   an update_requested from the peer is ignored instead of answered
+   (RFC 9147 section 8: never two KeyUpdates in flight).  */
+void gq_tls_set_key_update_busy (gq_tls *tls, int busy);
 
 /* Create a server engine.  It sends nothing until the ClientHello
    arrives through gq_tls_feed; gq_tls_start does not apply to servers.

@@ -453,6 +453,10 @@ gq_client_hello_parse (gq_slice body, gq_client_hello *ch)
   TRY (rd_vec (&r, 1, &ch->session_id));
   if (ch->session_id.len > 32)
     return GQ_ERR_ENCODING;
+  ch->legacy_cookie.data = r.p;
+  ch->legacy_cookie.len = 0;
+  if (ch->legacy_version == 0xfefd || ch->legacy_version == 0xfeff)
+    TRY (rd_vec (&r, 1, &ch->legacy_cookie));
   TRY (rd_vec (&r, 2, &ch->cipher_suites));
   if (ch->cipher_suites.len < 2 || ch->cipher_suites.len % 2)
     return GQ_ERR_ENCODING;
@@ -738,7 +742,7 @@ gq_build_server_hello (gq_wbuf *w, const gq_sh_params *p)
       return;
     }
   gq_wbuf_hs_open (w, GQ_HS_SERVER_HELLO);
-  gq_wbuf_u16 (w, 0x0303);			/* legacy_version */
+  gq_wbuf_u16 (w, p->dtls ? 0xfefd : 0x0303);	/* legacy_version */
   gq_wbuf_bytes (w, p->hello_retry_request ? gq_hrr_random : p->random, 32);
   gq_wbuf_open (w, 1);
   gq_wbuf_slice (w, p->session_id_echo);
@@ -759,7 +763,7 @@ gq_build_server_hello (gq_wbuf *w, const gq_sh_params *p)
       gq_wbuf_close (w);
     }
   gq_wbuf_ext_open (w, GQ_EXT_SUPPORTED_VERSIONS);
-  gq_wbuf_u16 (w, 0x0304);
+  gq_wbuf_u16 (w, p->dtls ? 0xfefc : 0x0304);
   gq_wbuf_close (w);
   if (p->hello_retry_request && p->cookie.len)
     {

@@ -224,14 +224,16 @@ gq_hkdf_expand (enum gq_hash alg, const void *prk, size_t prklen,
 }
 
 int
-gq_hkdf_expand_label (enum gq_hash alg, const void *secret, size_t secretlen,
-                      const char *label, const void *context,
-                      size_t contextlen, uint8_t *out, size_t outlen)
+gq_hkdf_expand_label_v (enum gq_hash alg, int dtls, const void *secret,
+                        size_t secretlen, const char *label,
+                        const void *context, size_t contextlen, uint8_t *out,
+                        size_t outlen)
 {
   /* struct { uint16 length; opaque label<7..255>; opaque context<0..255>; } */
   uint8_t info[2 + 1 + 255 + 1 + 255];
-  static const char prefix[] = "tls13 ";
-  size_t plen = sizeof prefix - 1;
+  static const char tls_prefix[] = "tls13 ", dtls_prefix[] = "dtls13";
+  const char *prefix = dtls ? dtls_prefix : tls_prefix;
+  size_t plen = dtls ? sizeof dtls_prefix - 1 : sizeof tls_prefix - 1;
   size_t llen, off = 0;
 
   if (label == NULL || outlen > 0xffff || contextlen > 255
@@ -254,6 +256,15 @@ gq_hkdf_expand_label (enum gq_hash alg, const void *secret, size_t secretlen,
   off += contextlen;
 
   return gq_hkdf_expand (alg, secret, secretlen, info, off, out, outlen);
+}
+
+int
+gq_hkdf_expand_label (enum gq_hash alg, const void *secret, size_t secretlen,
+                      const char *label, const void *context,
+                      size_t contextlen, uint8_t *out, size_t outlen)
+{
+  return gq_hkdf_expand_label_v (alg, 0, secret, secretlen, label, context,
+                                 contextlen, out, outlen);
 }
 
 /* ------------------------------------------------------------------ */

@@ -3,6 +3,9 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** DTLS 1.3 (dtls.h, dtlscookie.h): the TLS 1.3 engine over datagrams with
+record number encryption, fragmentation, ACKs, retransmission, KeyUpdate
+and a stateless address-validating cookie; tested against wolfSSL.
 ** TLS 1.2 (tls12.h, tls12conn.h) with the same restricted profile as
 Gumdrop and Hopf: ECDHE on secp256r1 and AEAD suites only, mandatory
 extended master secret and renegotiation indication, ticket resumption.

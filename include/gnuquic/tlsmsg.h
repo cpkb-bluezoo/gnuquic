@@ -107,10 +107,13 @@ typedef struct gq_client_hello
   uint16_t legacy_version;
   const uint8_t *random;	/* 32 bytes.  */
   gq_slice session_id;		/* 0 to 32 bytes.  */
+  gq_slice legacy_cookie;	/* DTLS only (RFC 9147 section 5.3), else empty.  */
   gq_slice cipher_suites;	/* Raw big-endian uint16 list.  */
   gq_slice extensions;		/* Raw extension block (validated).  */
 } gq_client_hello;
 
+/* A legacy_version of 0xfefd or 0xfeff marks a DTLS ClientHello, which
+   has the extra legacy_cookie vector after the session ID.  */
 int gq_client_hello_parse (gq_slice body, gq_client_hello *ch);
 
 typedef struct gq_server_hello
@@ -269,6 +272,8 @@ typedef struct gq_sh_params
   gq_slice cookie;		/* HelloRetryRequest only, may be empty.  */
   int psk_selected;
   uint16_t psk_identity;
+  int dtls;			/* DTLS 1.3: legacy_version 0xfefd and
+				   supported_versions 0xfefc.  */
 } gq_sh_params;
 
 /* Each builder appends one complete handshake message.  */

@@ -23,7 +23,8 @@
    CBC and other non-AEAD suites, static RSA key transport, RSA-PSS-less
    RSA signatures in TLS 1.3, SHA-1 signatures, renegotiation,
    compression, finite-field DH groups, export ciphers) is not a
-   configuration option; it is not implemented.  TLS 1.2 is a narrower
+   configuration option; it is not implemented.  DTLS 1.3 uses the TLS 1.3
+   lists unchanged.  TLS 1.2 is a narrower
    profile again: ECDHE on secp256r1 only, and no Ed25519 or ML-DSA.  The "Security policy" chapter of the manual
    gives the reasoning behind each choice.
 

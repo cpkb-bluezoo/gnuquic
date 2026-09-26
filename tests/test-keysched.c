@@ -268,10 +268,75 @@ test_transcript (void)
   gq_transcript_free (NULL);
 }
 
+/* RFC 9147 section 5.9: the label prefix is "dtls13", not "tls13 ".  Build
+   the HkdfLabel by hand and compare, so this does not lean on the code
+   under test.  */
+static void
+test_dtls_labels (void)
+{
+  uint8_t secret[32], want[32], got[32], info[64], key[16], iv[12], sn[16];
+  uint8_t tkey[16], tiv[12];
+  size_t n, i;
+  static const char label[] = "key";
+  gq_ks ks_tls, ks_dtls;
+  uint8_t a[32], b[32], th[32];
+
+  for (i = 0; i < 32; i++)
+    {
+      secret[i] = (uint8_t) (i + 1);
+      th[i] = (uint8_t) (0xa0 + i);
+    }
+  /* uint16 length, opaque label<7..255> = "dtls13" + label, context<0..255>.  */
+  n = 0;
+  info[n++] = 0;
+  info[n++] = 16;
+  info[n++] = (uint8_t) (6 + 3);
+  memcpy (info + n, "dtls13", 6);
+  n += 6;
+  memcpy (info + n, label, 3);
+  n += 3;
+  info[n++] = 0;
+  CHECK_EQ (gq_hkdf_expand (GQ_HASH_SHA256, secret, 32, info, n, want, 16),
+            GQ_OK);
+  CHECK_EQ (gq_hkdf_expand_label_v (GQ_HASH_SHA256, 1, secret, 32, "key", NULL,
+                                    0, got, 16), GQ_OK);
+  CHECK (memcmp (got, want, 16) == 0);
+  CHECK_EQ (gq_traffic_keys_dtls (GQ_AEAD_AES_128_GCM, secret, key, iv, sn),
+            GQ_OK);
+  CHECK (memcmp (key, want, 16) == 0);
+  /* Distinct from TLS, and the sequence number key is its own derivation.  */
+  CHECK_EQ (gq_traffic_keys (GQ_AEAD_AES_128_GCM, secret, tkey, tiv), GQ_OK);
+  CHECK (memcmp (key, tkey, 16) != 0 && memcmp (iv, tiv, 12) != 0);
+  CHECK (memcmp (sn, key, 16) != 0 && memcmp (sn, tkey, 16) != 0);
+
+  /* The whole schedule follows: same inputs, different secrets.  */
+  CHECK_EQ (gq_ks_early_v (&ks_tls, GQ_HASH_SHA256, NULL, 0, 0), GQ_OK);
+  CHECK_EQ (gq_ks_early_v (&ks_dtls, GQ_HASH_SHA256, NULL, 0, 1), GQ_OK);
+  CHECK_EQ (gq_ks_handshake (&ks_tls, secret, 32), GQ_OK);
+  CHECK_EQ (gq_ks_handshake (&ks_dtls, secret, 32), GQ_OK);
+  CHECK_EQ (gq_ks_handshake_traffic (&ks_tls, th, a, NULL), GQ_OK);
+  CHECK_EQ (gq_ks_handshake_traffic (&ks_dtls, th, b, NULL), GQ_OK);
+  CHECK (memcmp (a, b, 32) != 0);
+  CHECK_EQ (gq_finished_verify_data_v (GQ_HASH_SHA256, 1, secret, th, a),
+            GQ_OK);
+  CHECK_EQ (gq_finished_verify_data (GQ_HASH_SHA256, secret, th, b), GQ_OK);
+  CHECK (memcmp (a, b, 32) != 0);
+  /* dtls = 0 is exactly the TLS function.  */
+  CHECK_EQ (gq_finished_verify_data_v (GQ_HASH_SHA256, 0, secret, th, a),
+            GQ_OK);
+  CHECK (memcmp (a, b, 32) == 0);
+  CHECK_EQ (gq_traffic_secret_update_v (GQ_HASH_SHA256, 1, secret, a), GQ_OK);
+  CHECK_EQ (gq_traffic_secret_update (GQ_HASH_SHA256, secret, b), GQ_OK);
+  CHECK (memcmp (a, b, 32) != 0);
+  gq_ks_wipe (&ks_tls);
+  gq_ks_wipe (&ks_dtls);
+}
+
 int
 main (void)
 {
   CHECK_EQ (gq_crypto_init (), GQ_OK);
+  test_dtls_labels ();
   test_rfc8448_flow ();
   test_stage_discipline ();
   test_psk_and_384 ();

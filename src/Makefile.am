@@ -20,6 +20,10 @@ lib_LTLIBRARIES = libgnuquic.la
 
 libgnuquic_la_SOURCES = \
   crypto.c \
+  dtls.c \
+  dtlscookie.c \
+  dtlshs.c \
+  dtlsrec.c \
   gettext.h \
   frame.c \
   keysched.c \
@@ -60,6 +64,10 @@ libgnuquic_la_LDFLAGS = -version-info $(LIBGNUQUIC_LTVERSION) \
 gnuquicincludedir = $(includedir)/gnuquic
 gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/crypto.h \
+  $(top_srcdir)/include/gnuquic/dtls.h \
+  $(top_srcdir)/include/gnuquic/dtlscookie.h \
+  $(top_srcdir)/include/gnuquic/dtlshs.h \
+  $(top_srcdir)/include/gnuquic/dtlsrec.h \
   $(top_srcdir)/include/gnuquic/frame.h \
   $(top_srcdir)/include/gnuquic/keysched.h \
   $(top_srcdir)/include/gnuquic/kx.h \

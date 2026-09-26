@@ -57,6 +57,7 @@ typedef struct gq_ks
   enum gq_hash hash;
   size_t hlen;
   enum gq_ks_stage stage;
+  int dtls;			/* Labels use the "dtls13" prefix.  */
   uint8_t secret[GQ_MAX_HASH_LEN];
 } gq_ks;
 
@@ -65,6 +66,12 @@ typedef struct gq_ks
    must be hash-length when given.  */
 int gq_ks_early (gq_ks *ks, enum gq_hash hash, const uint8_t *psk,
                  size_t psk_len);
+
+/* As gq_ks_early, for DTLS 1.3: every label of the schedule (and of the
+   stateless helpers' _v forms below) then has the "dtls13" prefix of RFC
+   9147 section 5.9.  */
+int gq_ks_early_v (gq_ks *ks, enum gq_hash hash, const uint8_t *psk,
+                   size_t psk_len, int dtls);
 
 /* Early stage: binder key ("res binder" for a resumption PSK, "ext
    binder" otherwise), and the client early traffic secret ("c e traffic")
@@ -107,19 +114,33 @@ int gq_finished_verify_data (enum gq_hash hash, const uint8_t *base_secret,
 /* The finished key itself, hash-length.  */
 int gq_finished_key (enum gq_hash hash, const uint8_t *base_secret,
                      uint8_t *out);
+int gq_finished_verify_data_v (enum gq_hash hash, int dtls,
+                               const uint8_t *base_secret,
+                               const uint8_t *transcript_hash, uint8_t *out);
 
 /* Next application traffic secret for KeyUpdate ("traffic upd").  */
 int gq_traffic_secret_update (enum gq_hash hash, const uint8_t *secret,
                               uint8_t *next);
+int gq_traffic_secret_update_v (enum gq_hash hash, int dtls,
+                                const uint8_t *secret, uint8_t *next);
 
 /* Traffic key and IV for TLS record protection ("key", "iv").  KEY is
    gq_aead_key_size (AEAD) bytes, IV 12.  */
 int gq_traffic_keys (enum gq_aead aead, const uint8_t *secret,
                      uint8_t *key, uint8_t iv[GQ_AEAD_NONCE_LEN]);
 
+/* DTLS 1.3 (RFC 9147 section 4.2.3 and 5.9): the same with the "dtls13"
+   prefix, plus the record sequence number key ("sn", key length).  */
+int gq_traffic_keys_dtls (enum gq_aead aead, const uint8_t *secret,
+                          uint8_t *key, uint8_t iv[GQ_AEAD_NONCE_LEN],
+                          uint8_t *sn_key);
+
 /* Resumption PSK for one ticket ("resumption", ticket nonce as context).  */
 int gq_resumption_psk (enum gq_hash hash, const uint8_t *res_master,
                        const uint8_t *nonce, size_t nonce_len, uint8_t *out);
+int gq_resumption_psk_v (enum gq_hash hash, int dtls,
+                         const uint8_t *res_master, const uint8_t *nonce,
+                         size_t nonce_len, uint8_t *out);
 
 #ifdef __cplusplus
 }

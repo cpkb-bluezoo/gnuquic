@@ -88,12 +88,19 @@ int gq_hkdf_expand (enum gq_hash alg, const void *prk, size_t prklen,
                     uint8_t *out, size_t outlen);
 
 /* HKDF-Expand-Label (RFC 8446 section 7.1).  LABEL is given without the
-   "tls13 " prefix, which is added here.  CONTEXT may be empty.  */
+   "tls13 " prefix, which is added here.  CONTEXT may be empty.  The _v
+   form takes DTLS nonzero to use the "dtls13" prefix of RFC 9147
+   section 5.9 instead (note: no trailing space).  */
 int gq_hkdf_expand_label (enum gq_hash alg,
                           const void *secret, size_t secretlen,
                           const char *label,
                           const void *context, size_t contextlen,
                           uint8_t *out, size_t outlen);
+int gq_hkdf_expand_label_v (enum gq_hash alg, int dtls,
+                            const void *secret, size_t secretlen,
+                            const char *label,
+                            const void *context, size_t contextlen,
+                            uint8_t *out, size_t outlen);
 
 /* ---- AEAD and header protection ---- */
 

@@ -47,7 +47,8 @@ enum gq_status
   GQ_ERR_HANDLER = -8,		/* A handler callback asked to abort.  */
   GQ_ERR_CERT = -9,		/* Certificate rejected (see gq_trust).  */
   GQ_ERR_UNAVAILABLE = -10,	/* Feature not compiled in.  */
-  GQ_ERR_PROTOCOL = -11	/* Well-formed but illegal (illegal_parameter).  */
+  GQ_ERR_PROTOCOL = -11,	/* Well-formed but illegal (illegal_parameter).  */
+  GQ_ERR_TIMEOUT = -12		/* Retransmissions exhausted (DTLS).  */
 };
 
 /* Return a static, untranslated description of STATUS.  */
