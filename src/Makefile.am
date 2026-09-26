@@ -21,6 +21,10 @@ lib_LTLIBRARIES = libgnuquic.la
 libgnuquic_la_SOURCES = \
   crypto.c \
   dtls.c \
+  dtls_int.h \
+  dtls12.c \
+  dtls12cookie.c \
+  dtls12rec.c \
   dtlscookie.c \
   dtlshs.c \
   dtlsrec.c \
@@ -65,6 +69,9 @@ gnuquicincludedir = $(includedir)/gnuquic
 gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/crypto.h \
   $(top_srcdir)/include/gnuquic/dtls.h \
+  $(top_srcdir)/include/gnuquic/dtls12.h \
+  $(top_srcdir)/include/gnuquic/dtls12cookie.h \
+  $(top_srcdir)/include/gnuquic/dtls12rec.h \
   $(top_srcdir)/include/gnuquic/dtlscookie.h \
   $(top_srcdir)/include/gnuquic/dtlshs.h \
   $(top_srcdir)/include/gnuquic/dtlsrec.h \

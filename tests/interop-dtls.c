@@ -16,8 +16,8 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* A small DTLS 1.3 client and server over real UDP sockets, built on
-   gq_dtls, for testing GNU QUIC against an independent implementation
+/* A small DTLS 1.3 (or, with --dtls12, DTLS 1.2) client and server over
+   real UDP sockets, built on gq_dtls or gq_dtls12, for testing GNU QUIC against an independent implementation
    (tests/wolf-dtls.c, wolfSSL).  A test tool, not part of the library.
 
    interop-dtls client HOST PORT --ca FILE [options]
@@ -45,6 +45,8 @@
 #include <gnuquic/status.h>
 #include <gnuquic/policy.h>
 #include <gnuquic/dtls.h>
+#include <gnuquic/dtls12.h>
+#include <gnuquic/dtls12cookie.h>
 #include <gnuquic/dtlscookie.h>
 
 #include "interop-util.h"
@@ -52,6 +54,7 @@
 struct opts
 {
   int server;
+  int v12;			/* DTLS 1.2.  */
   const char *host, *port, *sni, *ca, *cert, *key;
   const char *alpn[4];
   size_t n_alpn;
@@ -61,8 +64,9 @@ struct opts
   int loss;			/* Percent of datagrams dropped each way.  */
   int loss_hs;			/* ...but only until the handshake is done.  */
   unsigned seed;
-  int twice, messages, key_update, timeout;
+  int twice, messages, key_update, timeout, http, rev;
   int cookie, connections;
+  size_t max_bytes;		/* Server: close after echoing this much.  */
   const char *client_auth;
   unsigned long rekey;
 };
@@ -74,16 +78,33 @@ struct state
   struct sockaddr_storage peer;
   socklen_t plen;
   int have_peer;
-  gq_dtls *d;
+  void *d;			/* gq_dtls, or gq_dtls12 with --dtls12.  */
   int connected, closed, close_error, close_alert, tickets;
   gq_tls_info info;
   gq_tls_session saved;
   int have_saved;
   int echoed;			/* Client: replies received.  Server: sent.  */
+  size_t bytes;
   char last[64];
   int got_new;			/* A datagram of application data arrived.  */
   uint32_t rng;
 };
+
+#define D_START(s, now) ((s)->o->v12 ? gq_dtls12_start ((s)->d, now) \
+                                     : gq_dtls_start ((s)->d, now))
+#define D_RECEIVE(s, b, n, now) \
+  ((s)->o->v12 ? gq_dtls12_receive ((s)->d, b, n, now) \
+               : gq_dtls_receive ((s)->d, b, n, now))
+#define D_SEND(s, b, n) ((s)->o->v12 ? gq_dtls12_send ((s)->d, b, n) \
+                                     : gq_dtls_send ((s)->d, b, n))
+#define D_CLOSE(s) ((s)->o->v12 ? gq_dtls12_close ((s)->d) \
+                                : gq_dtls_close ((s)->d))
+#define D_FREE(s) ((s)->o->v12 ? gq_dtls12_free ((s)->d) \
+                               : gq_dtls_free ((s)->d))
+#define D_DEADLINE(s) ((s)->o->v12 ? gq_dtls12_deadline ((s)->d) \
+                                   : gq_dtls_deadline ((s)->d))
+#define D_TIMEOUT(s, now) ((s)->o->v12 ? gq_dtls12_timeout ((s)->d, now) \
+                                       : gq_dtls_timeout ((s)->d, now))
 
 static uint64_t
 now_ms (void)
@@ -120,7 +141,11 @@ xsend (void *u, const uint8_t *d, size_t n)
       fprintf (stderr, "\n");
     }
   if (lose (s))
-    return 0;
+    {
+      if (getenv ("GQ_DUMP"))
+        fprintf (stderr, "  (dropped)\n");
+      return 0;
+    }
   if (s->o->server)
     sendto (s->fd, d, n, 0, (struct sockaddr *) &s->peer, s->plen);
   else
@@ -142,8 +167,11 @@ xdata (void *u, const uint8_t *d, size_t n)
   if (s->o->server)
     {
       /* Echo it.  */
-      if (gq_dtls_send (s->d, d, n) == GQ_OK)
+      if (D_SEND (s, d, n) == GQ_OK)
         s->echoed++;
+      s->bytes += n;
+      if (s->o->max_bytes && s->bytes >= s->o->max_bytes)
+        D_CLOSE (s);
     }
   else
     s->echoed++;
@@ -204,6 +232,12 @@ suite_code (const char *n)
   if (!strcmp (n, "aes128")) return GQ_TLS_AES_128_GCM_SHA256;
   if (!strcmp (n, "aes256")) return GQ_TLS_AES_256_GCM_SHA384;
   if (!strcmp (n, "chacha")) return GQ_TLS_CHACHA20_POLY1305_SHA256;
+  if (!strcmp (n, "ecdsa-aes128")) return GQ_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+  if (!strcmp (n, "ecdsa-aes256")) return GQ_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+  if (!strcmp (n, "ecdsa-chacha")) return GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305;
+  if (!strcmp (n, "rsa-aes128")) return GQ_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+  if (!strcmp (n, "rsa-aes256")) return GQ_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384;
+  if (!strcmp (n, "rsa-chacha")) return GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305;
   return 0;
 }
 
@@ -235,7 +269,7 @@ static ssize_t
 wait_and_read (struct state *s, uint8_t *buf, size_t cap, int max_ms,
                struct sockaddr_storage *from, socklen_t *fl)
 {
-  uint64_t now = now_ms (), dl = s->d ? gq_dtls_deadline (s->d) : 0;
+  uint64_t now = now_ms (), dl = s->d ? D_DEADLINE (s) : 0;
   int ms = max_ms;
   struct pollfd p;
   int r;
@@ -260,7 +294,7 @@ wait_and_read (struct state *s, uint8_t *buf, size_t cap, int max_ms,
       return n < 0 ? -1 : n;
     }
   if (s->d && dl && now >= dl)
-    gq_dtls_timeout (s->d, now);
+    D_TIMEOUT (s, now);
   return 0;
 }
 
@@ -317,13 +351,14 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
   memset (&params, 0, sizeof params);
   params.mtu = o->mtu;
   params.rekey_records = o->rekey;
-  r = gq_dtls_client_new (&st.d, cfg, &ev, &params);
+  r = o->v12 ? gq_dtls12_client_new ((gq_dtls12 **) &st.d, cfg, &ev, &params)
+             : gq_dtls_client_new ((gq_dtls **) &st.d, cfg, &ev, &params);
   if (r != GQ_OK)
     {
       printf ("result=fail reason=new status=%d\n", r);
       return 1;
     }
-  gq_dtls_start (st.d, now_ms ());
+  D_START (&st, now_ms ());
 
   while (!st.closed)
     {
@@ -332,8 +367,12 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
 
       if (n < 0)
         break;
+      if (n > 0 && getenv ("GQ_DUMP"))
+        fprintf (stderr, "recv %zd: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n", n,
+                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6],
+                 buf[7], buf[8], buf[9], buf[10], buf[11], buf[12]);
       if (n > 0 && !lose (&st))
-        gq_dtls_receive (st.d, buf, (size_t) n, now);
+        D_RECEIVE (&st, buf, (size_t) n, now);
       if (!st.connected || st.closed)
         continue;
       /* Stop and wait: one numbered message, resent if unanswered.  */
@@ -345,14 +384,17 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
               tries = 0;
               last_send = 0;
               if (k == o->messages / 2 && o->key_update)
-                gq_dtls_key_update (st.d, 1);
+                {
+                  if (!o->v12)
+                    gq_dtls_key_update (st.d, 1);
+                }
             }
           if (k < o->messages && (last_send == 0 || now - last_send > 600))
             {
               snprintf (m, sizeof m, "hello-%d", k);
               if (tries++ > 12)
                 break;
-              gq_dtls_send (st.d, (const uint8_t *) m, strlen (m));
+              D_SEND (&st, (const uint8_t *) m, strlen (m));
               last_send = now;
             }
         }
@@ -364,7 +406,7 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
             close_after = now + (o->twice ? 2500 : 100);
           if (now >= close_after || (o->twice && st.have_saved))
             {
-              gq_dtls_close (st.d);
+              D_CLOSE (&st);
               break;
             }
         }
@@ -380,12 +422,12 @@ run_client (struct opts *o, const gq_tls_config *cfg, gq_tls_session *save,
   if (st.connected && st.echoed >= o->messages && st.close_error == 0)
     {
       printf ("result=ok\n");
-      gq_dtls_free (st.d);
+      D_FREE (&st);
       return 0;
     }
   printf ("result=fail status=%d alert=%d closed=%d\n", st.close_error,
           st.close_alert, st.closed);
-  gq_dtls_free (st.d);
+  D_FREE (&st);
   return 2;
 }
 
@@ -446,7 +488,7 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
         continue;
       if (st.d && same_peer (&st, &from, fl))
         {
-          gq_dtls_receive (st.d, buf, (size_t) n, now);
+          D_RECEIVE (&st, buf, (size_t) n, now);
           continue;
         }
       if (st.d)
@@ -454,11 +496,17 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
       if (ck)
         {
           gq_tls_dtls_prime prime;
+          gq_dtls12_prime prime12;
           size_t rl;
-          int r = gq_dtls_listen (ck, cfg, (const uint8_t *) &from, fl, buf,
-                                  (size_t) n, reply, sizeof reply, &rl,
-                                  &prime);
+          int r;
 
+          if (o->v12)
+            r = gq_dtls12_listen (ck, (const uint8_t *) &from, fl, buf,
+                                  (size_t) n, reply, sizeof reply, &rl,
+                                  &prime12);
+          else
+            r = gq_dtls_listen (ck, cfg, (const uint8_t *) &from, fl, buf,
+                                (size_t) n, reply, sizeof reply, &rl, &prime);
           if (r == GQ_DTLS_LISTEN_REPLY)
             {
               if (!lose (&st))
@@ -471,14 +519,17 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
               st.peer = from;
               st.plen = fl;
               st.have_peer = 1;
-              if (gq_dtls_server_new (&st.d, cfg, &ev, &params, &prime)
-                  != GQ_OK)
+              if ((o->v12
+                   ? gq_dtls12_server_new ((gq_dtls12 **) &st.d, cfg, &ev,
+                                           &params, &prime12)
+                   : gq_dtls_server_new ((gq_dtls **) &st.d, cfg, &ev,
+                                         &params, &prime)) != GQ_OK)
                 {
                   ok = 0;
                   break;
                 }
               printf ("cookie-verified\n");
-              gq_dtls_receive (st.d, buf, (size_t) n, now);
+              D_RECEIVE (&st, buf, (size_t) n, now);
             }
         }
       else
@@ -486,12 +537,16 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
           st.peer = from;
           st.plen = fl;
           st.have_peer = 1;
-          if (gq_dtls_server_new (&st.d, cfg, &ev, &params, NULL) != GQ_OK)
+          if ((o->v12
+               ? gq_dtls12_server_new ((gq_dtls12 **) &st.d, cfg, &ev, &params,
+                                       NULL)
+               : gq_dtls_server_new ((gq_dtls **) &st.d, cfg, &ev, &params,
+                                     NULL)) != GQ_OK)
             {
               ok = 0;
               break;
             }
-          gq_dtls_receive (st.d, buf, (size_t) n, now);
+          D_RECEIVE (&st, buf, (size_t) n, now);
         }
     }
   printf ("echoed=%d\n", st.echoed);
@@ -502,7 +557,7 @@ run_server (struct opts *o, gq_tls_server_config *cfg, int fd)
       ok = 0;
     }
   fflush (stdout);
-  gq_dtls_free (st.d);
+  D_FREE (&st);
   gq_dtls_cookies_free (ck);
   printf (ok ? "result=ok\n" : "result=fail\n");
   return ok ? 0 : 2;
@@ -574,9 +629,13 @@ main (int argc, char **argv)
       else if (OPT ("--messages")) o.messages = atoi (v);
       else if (OPT ("--timeout")) o.timeout = atoi (v);
       else if (OPT ("--connections")) o.connections = atoi (v);
+      else if (OPT ("--max-bytes")) o.max_bytes = (size_t) atol (v);
       else if (OPT ("--client-auth")) o.client_auth = v;
       else if (OPT ("--rekey")) o.rekey = (unsigned long) atol (v);
       else if (!strcmp (a, "--loss-handshake")) o.loss_hs = 2;
+      else if (!strcmp (a, "--dtls12")) o.v12 = 1;
+      else if (!strcmp (a, "--http")) { o.http = 1; o.messages = 1; }
+      else if (!strcmp (a, "--rev")) { o.rev = 1; o.messages = 1; }
       else if (!strcmp (a, "--twice")) o.twice = 1;
       else if (!strcmp (a, "--key-update")) o.key_update = 1;
       else if (!strcmp (a, "--cookie")) o.cookie = 1;

@@ -66,6 +66,7 @@ gq_tls12_server_new (gq_tls12 **out, const gq_tls_server_config *cfg,
   if (t == NULL)
     return GQ_ERR_NOMEM;
   t->server = 1;
+  t->dtls = cfg->dtls != 0;
   t->scfg = *cfg;
   t->sink = *sink;
   t->alert = -1;
@@ -128,7 +129,7 @@ read_exts (gq_tls12 *t, const gq_client_hello *ch, struct choice *c)
       r = gq_list_u16 (v, 1, &list);
       if (r != GQ_OK)
         return g12_fail_parse (t, r);
-      if (!gq_u16_contains (list, 0x0303))
+      if (!gq_u16_contains (list, t->dtls ? 0xfefd : 0x0303))
         return g12_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
     }
 
@@ -277,6 +278,7 @@ s_send_full_flight (gq_tls12 *t, int issue_ticket)
   sp.random = t->server_random;
   sp.cipher_suite = t->suite;
   sp.issue_ticket = issue_ticket;
+  sp.dtls = t->dtls;
   sp.alpn.data = t->info.alpn;
   sp.alpn.len = t->info.alpn_len;
   gq_wbuf_init (&w, buf, sizeof buf);
@@ -340,7 +342,7 @@ s_on_client_hello (gq_tls12 *t, gq_slice msg, gq_slice body)
 
   if (r != GQ_OK)
     return g12_fail_parse (t, r);
-  if (ch.legacy_version < 0x0303)
+  if (t->dtls ? ch.legacy_version != 0xfefd : ch.legacy_version < 0x0303)
     return g12_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
   memcpy (t->client_random, ch.random, 32);
   TRY (read_exts (t, &ch, &c));
@@ -394,6 +396,7 @@ s_on_client_hello (gq_tls12 *t, gq_slice msg, gq_slice body)
       sp.random = t->server_random;
       sp.session_id = (gq_slice) { t->sid, t->sid_len };
       sp.cipher_suite = t->suite;
+      sp.dtls = t->dtls;
       sp.alpn.data = t->info.alpn;
       sp.alpn.len = t->info.alpn_len;
       gq_wbuf_init (&w, buf, sizeof buf);

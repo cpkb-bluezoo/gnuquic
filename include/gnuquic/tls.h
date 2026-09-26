@@ -265,9 +265,10 @@ typedef struct gq_tls_config
      callback at GQ_LEVEL_EARLY; the amount is limited by the session's
      max_early_data.  */
   int early_data;
-  /* DTLS 1.3 (RFC 9147): version 0xfefc, the legacy_cookie field, no
-     compatibility session ID, "dtls13" HKDF labels.  Refused together with
-     quic and early_data.  Normally set by gq_dtls, not by applications.  */
+  /* DTLS (RFC 9147 for the 1.3 engine, RFC 6347 for the 1.2 engine of
+     tls12.h): set by gq_dtls and gq_dtls12, not by applications.  For 1.3:
+     version 0xfefc, the legacy_cookie field, no compatibility session ID,
+     "dtls13" HKDF labels.  Refused together with quic and early_data.  */
   int dtls;
   /* Largest handshake message body accepted.  0 selects 65536.  */
   size_t max_message_len;
