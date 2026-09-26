@@ -79,6 +79,9 @@ struct app
   int have_sess;
   uint32_t sess_version;
   int pv, pf, mig;		/* Path events.  */
+  int early_bytes, early_result, early_dg;
+  uint8_t params[512];
+  size_t params_len;
   int dg_recv, dg_bad, dg_acked, dg_lost;
   uint8_t dg_seen[1024];	/* By the id in the payload.  */
   uint8_t dg_fate[1024];
@@ -202,6 +205,8 @@ ev_data (void *u, uint64_t id, const uint8_t *d, size_t n, int fin)
       }
   s->n += n;
   a->total_in += n;
+  if (a->c && gq_conn_early_data_active (a->c))
+    a->early_bytes += (int) n;
   CHECK (!s->fin);
   if (fin)
     {
@@ -251,9 +256,13 @@ ev_new_token (void *u, const uint8_t *t, size_t n)
   a->tokens++;
 }
 
-/* Set by the resumption test.  */
+/* Set by the resumption and 0-RTT tests.  */
 static gq_ticket_keys *g_ring;
 static const gq_tls_session *g_resume;
+static gq_replay_cache *g_replay;
+static int g_early_server, g_early_client;
+static const uint8_t *g_resume_params;
+static size_t g_resume_params_len;
 
 static void
 ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
@@ -265,6 +274,8 @@ ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
   CHECK_EQ (gq_tls_session_store (&a->sess, t), GQ_OK);
   a->have_sess = 1;
   a->sess_version = version;
+  CHECK_EQ (gq_conn_get_peer_params (a->c, a->params, sizeof a->params,
+                                     &a->params_len), GQ_OK);
 }
 
 static void
@@ -312,6 +323,8 @@ ev_datagram (void *u, const uint8_t *d, size_t n)
   if (i < sizeof a->dg_seen)
     a->dg_seen[i]++;
   a->dg_recv++;
+  if (a->c && gq_conn_early_data_active (a->c))
+    a->early_dg++;
 }
 
 static void
@@ -332,6 +345,12 @@ ev_dg_lost (void *u, uint64_t id)
   a->dg_lost++;
   if (id < sizeof a->dg_fate)
     a->dg_fate[id]++;
+}
+
+static void
+ev_early_result (void *u, int accepted)
+{
+  ((struct app *) u)->early_result = accepted ? 1 : -1;
 }
 
 static void
@@ -663,6 +682,7 @@ fill_events (gq_conn_events *e, struct app *a)
   e->cid_retired = ev_cid_retired;
   e->new_token = ev_new_token;
   e->ticket = ev_ticket;
+  e->early_data_result = ev_early_result;
   e->datagram = ev_datagram;
   e->datagram_acked = ev_dg_acked;
   e->datagram_lost = ev_dg_lost;
@@ -698,10 +718,23 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   p->scfg.n_alpn = 1;
   p->scfg.ticket_keys = g_ring;
   p->ccfg.resume = g_resume;
+  p->ccfg.early_data = g_early_client;
+  if (g_early_server)
+    {
+      p->scfg.max_early_data = 0xffffffffU;
+      p->scfg.replay_check = gq_replay_cache_check;
+      p->scfg.replay_user = g_replay;
+    }
   fill_events (&p->cev, &p->cli);
   fill_events (&p->sev, &p->srv);
-  CHECK_EQ (gq_conn_client_new (&p->cli.c, ccfg, &p->ccfg, &p->cev,
-                                p->net.now), GQ_OK);
+  {
+    gq_conn_config cc = ccfg ? *ccfg : (gq_conn_config) { 0 };
+
+    cc.resume_params = g_resume_params;
+    cc.resume_params_len = g_resume_params_len;
+    CHECK_EQ (gq_conn_client_new (&p->cli.c, &cc, &p->ccfg, &p->cev,
+                                  p->net.now), GQ_OK);
+  }
   CHECK_EQ (gq_conn_server_new (&p->srv.c, scfg, &p->scfg, &p->sev,
                                 p->net.now), GQ_OK);
   return p;
@@ -1817,6 +1850,181 @@ test_migration_limits (void)
   pair_free (p);
 }
 
+/* ---- 0-RTT ---- */
+
+struct saved
+{
+  gq_tls_session sess;
+  uint8_t params[512];
+  size_t params_len;
+};
+
+/* A full handshake that leaves a resumable session behind.  */
+static void
+get_session (const gq_conn_config *ccfg, const gq_conn_config *scfg,
+             uint32_t seed, struct saved *out)
+{
+  struct pair *p;
+
+  g_early_client = 0;
+  g_resume = NULL;
+  g_resume_params = NULL;
+  p = pair_new (ccfg, scfg, 0, seed);
+  exchange (p);
+  run (&p->net, NULL, 1000000);
+  CHECK (p->cli.have_sess);
+  out->sess = p->cli.sess;
+  memcpy (out->params, p->cli.params, p->cli.params_len);
+  out->params_len = p->cli.params_len;
+  pair_free (p);
+}
+
+/* A connection that offers early data with SAVED.  */
+static struct pair *
+early_pair (const gq_conn_config *ccfg, const gq_conn_config *scfg,
+            unsigned loss, uint32_t seed, struct saved *sv)
+{
+  struct pair *p;
+
+  g_early_client = 1;
+  g_resume = &sv->sess;
+  g_resume_params = sv->params;
+  g_resume_params_len = sv->params_len;
+  p = pair_new (ccfg, scfg, loss, seed);
+  g_early_client = 0;
+  g_resume = NULL;
+  g_resume_params = NULL;
+  return p;
+}
+
+static void
+test_early_data (void)
+{
+  gq_conn_config cc, sc;
+  struct saved sv;
+  struct pair *p;
+  struct sbuf *s;
+  uint64_t t0;
+  int i;
+
+  CHECK_EQ (gq_ticket_keys_new (&g_ring), GQ_OK);
+  CHECK_EQ (gq_replay_cache_new (&g_replay, 1000), GQ_OK);
+  g_early_server = 1;
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  cc.version = GQ_VERSION_1;
+  sc.version = GQ_VERSION_1;
+
+  /* Accepted: the request travels with the ClientHello and is answered
+     within a round trip of the handshake, not after it.  */
+  get_session (&cc, &sc, 120, &sv);
+  p = early_pair (&cc, &sc, 0, 121, &sv);
+  t0 = p->net.now;
+  s = start_transfer (p, 5000);
+  CHECK (run (&p->net, transfer_done, 30000000));
+  CHECK_EQ (s->n, 5000);
+  CHECK_EQ (p->cli.early_result, 1);
+  CHECK_EQ (gq_conn_early_data_accepted (p->cli.c), 1);
+  CHECK_EQ (p->srv.early_bytes, 20);
+  CHECK (p->cli.info.resumed);
+  CHECK (p->net.now < t0 + 35000);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  pair_free (p);
+
+  /* A ticket buys early data once: the second use is refused, and the
+     request goes out again in 1-RTT packets, once only.  */
+  p = early_pair (&cc, &sc, 0, 122, &sv);
+  s = start_transfer (p, 5000);
+  CHECK (run (&p->net, transfer_done, 30000000));
+  CHECK_EQ (s->n, 5000);
+  CHECK_EQ (p->cli.early_result, -1);
+  CHECK_EQ (gq_conn_early_data_accepted (p->cli.c), 0);
+  CHECK_EQ (p->srv.early_bytes, 0);
+  CHECK_EQ (p->srv.total_in, 20);
+  pair_free (p);
+
+  /* A server that takes no early data at all.  */
+  get_session (&cc, &sc, 123, &sv);
+  g_early_server = 0;
+  p = early_pair (&cc, &sc, 0, 124, &sv);
+  s = start_transfer (p, 5000);
+  CHECK (run (&p->net, transfer_done, 30000000));
+  CHECK_EQ (s->n, 5000);
+  CHECK_EQ (p->cli.early_result, -1);
+  CHECK_EQ (p->srv.early_bytes, 0);
+  CHECK_EQ (p->srv.total_in, 20);
+  pair_free (p);
+  g_early_server = 1;
+
+  /* Version 2, and loss and reordering on the way: the data arrives once,
+     whatever happens to the first flight.  */
+  cc.version = sc.version = GQ_VERSION_2;
+  for (i = 0; i < 8; i++)
+    {
+      struct sbuf *x;
+
+      get_session (&cc, &sc, 130 + (uint32_t) i, &sv);
+      p = early_pair (&cc, &sc, i < 4 ? 15 : 0, 140 + (uint32_t) i, &sv);
+      p->net.reorder = i >= 4;
+      x = start_transfer (p, 30000);
+      CHECK (run (&p->net, transfer_done, 60000000));
+      CHECK_EQ (x->n, 30000);
+      CHECK_EQ (p->srv.total_in, 20);
+      CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+      CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+      pair_free (p);
+    }
+  cc.version = sc.version = GQ_VERSION_1;
+
+  /* A datagram sent early is delivered early, once; if the early data is
+     refused it is reported lost (the application decides what to do).  */
+  sc.max_datagram_frame_size = 1200;
+  get_session (&cc, &sc, 150, &sv);
+  {
+    uint8_t d[10] = { 0, 3, 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint64_t id;
+    int k;
+
+    for (k = 2; k < 10; k++)
+      d[k] = (uint8_t) (3 * 5 + k);
+    p = early_pair (&cc, &sc, 0, 151, &sv);
+    CHECK_EQ (gq_conn_datagram_send (p->cli.c, d, sizeof d, &id), GQ_OK);
+    run (&p->net, NULL, 500000);
+    CHECK (p->srv.dg_recv == 1 && p->srv.early_dg == 1 && p->srv.dg_bad == 0);
+    CHECK_EQ (p->cli.early_result, 1);
+    pair_free (p);
+    /* The same session again: refused (replay), so the datagram is lost.  */
+    p = early_pair (&cc, &sc, 0, 152, &sv);
+    CHECK_EQ (gq_conn_datagram_send (p->cli.c, d, sizeof d, &id), GQ_OK);
+    run (&p->net, NULL, 500000);
+    CHECK (p->srv.dg_recv == 0 && p->cli.dg_lost == 1);
+    CHECK_EQ (p->cli.early_result, -1);
+    pair_free (p);
+  }
+  sc.max_datagram_frame_size = 0;
+
+  /* A server that promised less this time than it did before, while
+     accepting early data, is in breach: the client ends the connection.  */
+  get_session (&cc, &sc, 160, &sv);
+  {
+    gq_conn_config tight = sc;
+
+    tight.initial_max_data = 1u << 19;
+    p = early_pair (&cc, &tight, 0, 161, &sv);
+    start_transfer (p, 5000);
+    run (&p->net, NULL, 3000000);
+    CHECK_EQ (p->cli.closed, 1);
+    CHECK (p->cli.ci.error == GQ_QERR_PROTOCOL_VIOLATION);
+    pair_free (p);
+  }
+  g_early_server = 0;
+  gq_ticket_keys_free (g_ring);
+  g_ring = NULL;
+  gq_replay_cache_free (g_replay);
+  g_replay = NULL;
+}
+
 static void
 test_close (void)
 {
@@ -2020,6 +2228,7 @@ main (void)
   test_admit_input ();
   test_compat ();
   test_resumption ();
+  test_early_data ();
   test_datagrams ();
   test_nat_rebinding ();
   test_active_migration ();

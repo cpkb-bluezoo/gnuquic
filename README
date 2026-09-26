@@ -87,7 +87,7 @@ Pre-alpha.  What exists today:
            timeout, close and stateless reset; NewReno congestion control
            (RFC 9002 section 7); interoperating with quiche
 
-Not yet written: pacing and ECN, 0-RTT early data, the server's
+Not yet written: pacing and ECN, the server's
 preferred_address, and the HTTP/3 and DoQ examples.  See the manual
 (doc/gnuquic.texi) for the design, security policy and roadmap.
 

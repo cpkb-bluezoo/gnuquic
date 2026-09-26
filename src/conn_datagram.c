@@ -88,7 +88,10 @@ gq_conn_datagram_send (gq_conn *c, const uint8_t *data, size_t len,
   struct dgram *d;
   uint8_t *copy;
 
-  if (c->state != GQ_CONN_ESTABLISHED || gq_conn_datagram_max (c) == 0)
+  if ((c->state != GQ_CONN_ESTABLISHED
+       && !(c->state == GQ_CONN_HANDSHAKE && c->early_provisional
+            && !c->early_rejected))
+      || gq_conn_datagram_max (c) == 0)
     return GQ_ERR_UNAVAILABLE;
   if (len > gq_conn_datagram_max (c))
     return GQ_ERR_RANGE;

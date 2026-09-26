@@ -115,6 +115,18 @@ gq_sstream_reset (gq_sstream *s, uint64_t err)
 }
 
 void
+gq_sstream_rewind (gq_sstream *s)
+{
+  if (s->reset)
+    return;
+  s->sent = s->base;
+  s->fin_sent = s->fin_lost = 0;
+  s->blocked_at = 0;
+  gq_ranges_clear (&s->lost);
+  gq_ranges_clear (&s->acked);
+}
+
+void
 gq_sstream_set_max (gq_sstream *s, uint64_t max)
 {
   if (max > s->max_data)

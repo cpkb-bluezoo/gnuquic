@@ -84,6 +84,9 @@ struct gq_endpoint
   int serving, closed;
   size_t cid_len;
   gq_token_keys keys;
+  gq_tls_server_config scfg;	/* The server's, with our tickets and 0-RTT.  */
+  gq_ticket_keys *ticket_ring;
+  gq_replay_cache *replay;
   uint64_t seed;
   /* Connection IDs, and the peers' stateless reset tokens (as keys of
      their own length).  */
@@ -544,8 +547,39 @@ gq_endpoint_new (gq_endpoint **out, const gq_endpoint_config *config,
       free (ep);
       return GQ_ERR_CRYPTO;
     }
+  if (config->server)
+    {
+      ep->scfg = *config->server;
+      if (config->tickets && ep->scfg.ticket_keys == NULL)
+        {
+          if (gq_ticket_keys_new (&ep->ticket_ring) != GQ_OK)
+            goto fail;
+          ep->scfg.ticket_keys = ep->ticket_ring;
+        }
+      if (config->early_data && ep->scfg.ticket_keys)
+        {
+          if (ep->scfg.replay_check == NULL)
+            {
+              if (gq_replay_cache_new (&ep->replay,
+                                       config->replay_capacity
+                                       ? config->replay_capacity : 65536)
+                  != GQ_OK)
+                goto fail;
+              ep->scfg.replay_check = gq_replay_cache_check;
+              ep->scfg.replay_user = ep->replay;
+            }
+          if (ep->scfg.max_early_data == 0)
+            ep->scfg.max_early_data = 0xffffffffU;
+        }
+    }
   *out = ep;
   return GQ_OK;
+fail:
+  gq_ticket_keys_free (ep->ticket_ring);
+  gq_replay_cache_free (ep->replay);
+  gq_token_keys_wipe (&ep->keys);
+  free (ep);
+  return GQ_ERR_NOMEM;
 }
 
 void
@@ -573,6 +607,8 @@ gq_endpoint_free (gq_endpoint *ep)
   free (ep->cids.tab);
   free (ep->tokens.tab);
   gq_token_keys_wipe (&ep->keys);
+  gq_ticket_keys_free (ep->ticket_ring);
+  gq_replay_cache_free (ep->replay);
   memset (ep->cfg.reset_key, 0, sizeof ep->cfg.reset_key);
   free (ep);
 }
@@ -660,7 +696,7 @@ admit (gq_endpoint *ep, uint64_t now, const gq_path *from, uint8_t *data,
   if (ep->ev.accept (ep->ev.user, from, &cev) != 0)
     return GQ_OK;
   conn_config (ep, NULL, &cc);
-  if (gq_conn_server_accept (&c, &cc, ep->cfg.server, &cev, now, &acc)
+  if (gq_conn_server_accept (&c, &cc, &ep->scfg, &cev, now, &acc)
       != GQ_OK)
     return GQ_ERR_NOMEM;
   e = adopt (ep, c);
@@ -869,5 +905,7 @@ gq_endpoint_close (gq_endpoint *ep, uint64_t now_us, int application,
 int
 gq_endpoint_rotate_keys (gq_endpoint *ep)
 {
+  if (ep->ticket_ring)
+    gq_ticket_keys_rotate (ep->ticket_ring);
   return gq_token_keys_rotate (&ep->keys);
 }

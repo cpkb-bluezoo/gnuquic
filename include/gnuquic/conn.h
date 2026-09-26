@@ -59,7 +59,9 @@
    Many connections behind one socket are handled by the endpoint layer
    (endpoint.h), which routes datagrams to them.
 
-   Not done here (later steps): 0-RTT.  */
+   0-RTT (RFC 9001 section 4.6) is supported for QUIC v1 and v2 sessions.
+
+   Not done here (later steps): pacing and ECN.  */
 
 #ifndef GNUQUIC_CONN_H
 #define GNUQUIC_CONN_H
@@ -178,6 +180,11 @@ typedef struct gq_conn_events
   void (*path_validated) (void *user, const gq_path *path);
   void (*path_failed) (void *user, const gq_path *path);
   void (*migrated) (void *user, const gq_path *path);
+  /* Client: the server accepted (1) or rejected (0) the early data.  On
+     rejection everything sent early is sent again in 1-RTT packets by
+     the library; an application whose early data depended on the server's
+     settings must redo that itself.  */
+  void (*early_data_result) (void *user, int accepted);
   /* Client: NEW_TOKEN from the server, to keep for a later connection.  */
   void (*new_token) (void *user, const uint8_t *token, size_t len);
   /* Client: session ticket for resumption, with the QUIC version of this
@@ -237,6 +244,15 @@ typedef struct gq_conn_config
   void (*reset_token) (void *user, const uint8_t *cid, size_t len,
                        uint8_t token[GQ_RESET_TOKEN_LEN]);
   void *reset_user;
+  /* 0-RTT, client (RFC 9001 section 4.6): the server's transport parameters
+     from the connection that issued the session offered in
+     gq_tls_config.resume, as returned by gq_conn_get_peer_params.  With them
+     and gq_tls_config.early_data set, streams can be opened and written and
+     datagrams sent before the handshake completes; the session must come
+     from a connection of the version this one starts in, so pin
+     VERSION (and list only it).  */
+  const uint8_t *resume_params;
+  size_t resume_params_len;
   /* Wall clock in seconds, for token ages.  NULL uses time().  */
   uint64_t (*wall_seconds) (void *user);
   void *wall_user;
@@ -356,6 +372,22 @@ uint32_t gq_conn_version (const gq_conn *c);
    Also: the Destination Connection ID of the first Initial (a server
    endpoint routes by it until the client switches).  */
 const uint8_t *gq_conn_initial_dcid (const gq_conn *c, size_t *len);
+
+/* ---- 0-RTT ---- */
+
+/* The server's transport parameters, encoded, as received: keep them with
+   the session ticket and pass them as resume_params next time.  */
+int gq_conn_get_peer_params (const gq_conn *c, uint8_t *out, size_t cap,
+                             size_t *len);
+
+/* Server: nonzero while the data being delivered arrived in a 0-RTT packet.
+   Such data can be replayed by an attacker (RFC 8446 section 8): do only what
+   is safe to do twice, or wait until the handshake completes.  */
+int gq_conn_early_data_active (const gq_conn *c);
+
+/* Client: 1 if the server accepted early data, 0 if it rejected it, -1 if not
+   known yet or none was offered.  */
+int gq_conn_early_data_accepted (const gq_conn *c);
 
 /* ---- Endpoint support ---- */
 

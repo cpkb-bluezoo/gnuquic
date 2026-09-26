@@ -74,6 +74,7 @@ typedef struct sent_pkt
   uint64_t time_us;
   uint32_t size;
   uint8_t ack_eliciting, in_flight, requeued;
+  uint8_t early;		/* Sent as a 0-RTT packet.  */
   uint32_t nframes;
   sent_frame *frames;
 } sent_pkt;
@@ -165,6 +166,17 @@ struct gq_conn
   uint32_t orig_version;	/* Version of the first flight.  */
   uint8_t switched;		/* A compatible version switch happened.  */
   uint8_t vn_received;		/* Restarted after Version Negotiation.  */
+  /* 0-RTT (RFC 9001 section 4.6).  */
+  gq_packet_keys early_wk, early_rk;
+  uint8_t have_early_wk, have_early_rk;
+  uint8_t early_offered;	/* Client: we sent (or may send) early data.  */
+  uint8_t early_provisional;	/* Limits are the remembered ones.  */
+  uint8_t early_accepted, early_rejected;
+  uint8_t rx_early;		/* The packet being processed is 0-RTT.  */
+  uint64_t early_rk_deadline;
+  gq_transport_params resume_tp;
+  uint8_t peer_tp_raw[512];
+  size_t peer_tp_raw_len;
   gq_packet_keys orig_rk;	/* Server: Initial keys of orig_version.  */
   uint8_t have_orig_rk;
 
@@ -324,6 +336,10 @@ void requeue_frames (gq_conn *c, int sp, sent_pkt *p);
 uint64_t pto_interval (const gq_conn *c, int sp);
 int conn_can_send_ae (const gq_conn *c);
 void cc_init (gq_conn *c);
+
+/* conn_loss.c (0-RTT) */
+void conn_early_rejected (gq_conn *c);
+void conn_early_accepted (gq_conn *c);
 
 /* conn_stream.c */
 stream *stream_find (const gq_conn *c, uint64_t id);

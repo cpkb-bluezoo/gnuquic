@@ -543,8 +543,11 @@ pto_space (const gq_conn *c, uint64_t *when)
   if (c->role == GQ_ROLE_SERVER && !c->peer_addr_validated
       && c->bytes_sent >= 3 * c->bytes_recv)
     return -1;			/* Nothing may be sent anyway.  */
+  /* 0-RTT data in flight does not count before the handshake is confirmed
+     (RFC 9002 section 6.2.2.1): the client must keep probing the handshake.  */
   for (sp = 0; sp < N_SPACES; sp++)
-    if (!c->sp[sp].discarded && c->sp[sp].ae_in_flight)
+    if (!c->sp[sp].discarded && c->sp[sp].ae_in_flight
+        && (sp != SP_APP || c->handshake_confirmed))
       any = 1;
   if (!any)
     {
@@ -639,4 +642,73 @@ int
 conn_can_send_ae (const gq_conn *c)
 {
   return c->bytes_in_flight < c->cwnd;
+}
+
+/* ---- 0-RTT outcome (client) ---- */
+
+void
+conn_early_accepted (gq_conn *c)
+{
+  const gq_transport_params *o = &c->resume_tp, *n = &c->peer_tp;
+
+  c->early_accepted = 1;
+  /* The server may not have tightened what it promised (RFC 9000 7.4.1).  */
+  if (n->initial_max_data < o->initial_max_data
+      || n->initial_max_stream_data_bidi_local
+         < o->initial_max_stream_data_bidi_local
+      || n->initial_max_stream_data_bidi_remote
+         < o->initial_max_stream_data_bidi_remote
+      || n->initial_max_stream_data_uni < o->initial_max_stream_data_uni
+      || n->initial_max_streams_bidi < o->initial_max_streams_bidi
+      || n->initial_max_streams_uni < o->initial_max_streams_uni
+      || n->max_datagram_frame_size < o->max_datagram_frame_size)
+    {
+      conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "0-RTT limits reduced");
+      return;
+    }
+  if (c->ev.early_data_result)
+    c->ev.early_data_result (c->ev.user, 1);
+}
+
+/* Rejected: whatever went out as 0-RTT is void.  Stream data goes out again
+   from the start as if never sent, under the limits the server really
+   has.  */
+void
+conn_early_rejected (gq_conn *c)
+{
+  space *s = &c->sp[SP_APP];
+  size_t i, j = 0;
+
+  c->early_rejected = 1;
+  c->early_accepted = 0;
+  c->have_early_wk = 0;
+  gq_packet_keys_wipe (&c->early_wk);
+  for (i = 0; i < s->n_sent; i++)
+    {
+      sent_pkt *p = &s->sent[i];
+
+      if (!p->early)
+        {
+          s->sent[j++] = *p;
+          continue;
+        }
+      if (p->in_flight)
+        c->bytes_in_flight -= p->size;
+      if (p->ack_eliciting && s->ae_in_flight)
+        s->ae_in_flight--;
+      requeue_frames (c, SP_APP, p);
+      free_sent_frames (p);
+    }
+  s->n_sent = j;
+  for (i = 0; i < c->n_streams; i++)
+    if (c->streams[i]->has_send)
+      {
+        gq_sstream_rewind (&c->streams[i]->s);
+        c->streams[i]->s.max_data
+          = stream_initial_send_credit (c, c->streams[i]->id);
+      }
+  c->data_sent = 0;
+  c->blocked_sent_at = 0;
+  if (c->ev.early_data_result)
+    c->ev.early_data_result (c->ev.user, 0);
 }

@@ -32,6 +32,8 @@
 #define ACK_RANGES_MAX 24
 #define MIN_PACKET_ROOM 40	/* Not worth starting a packet in less.  */
 
+static int early_usable (const gq_conn *c);
+
 /* One packet under construction.  */
 typedef struct pk
 {
@@ -43,6 +45,7 @@ typedef struct pk
   int ae;			/* Contains an ack-eliciting frame.  */
   int closing;
   int challenge;		/* Carries a PATH_CHALLENGE.  */
+  int early;			/* A 0-RTT packet.  */
   size_t hdr_est;		/* Header estimate used to size cap.  */
 } pk;
 
@@ -148,6 +151,8 @@ conn_have_work (gq_conn *c, int sp)
 {
   space *s = &c->sp[sp];
 
+  if (sp == SP_APP && early_usable (c))
+    return conn_can_send_ae (c) && app_pending (c);
   if (s->discarded || !s->have_wk)
     return 0;
   if (s->ack_now || s->probes)
@@ -375,9 +380,51 @@ add_stream_data (gq_conn *c, pk *p, stream *st)
 }
 
 static void
-add_app_frames (gq_conn *c, pk *p)
+add_datagrams (gq_conn *c, pk *p)
+{
+  sent_frame e;
+
+  /* Datagrams before stream data: they are the latency sensitive ones.  */
+  while (c->dq_n)
+    {
+      struct dgram *d = datagram_front (c);
+      gq_frame df;
+
+      if (room (p) < 1 + 2 + d->len || p->nsf >= MAX_FRAMES_PER_PACKET)
+        break;
+      memset (&df, 0, sizeof df);
+      df.type = GQ_FRAME_DATAGRAM;
+      df.u.datagram.data.data = d->data;
+      df.u.datagram.data.len = d->len;
+      memset (&e, 0, sizeof e);
+      e.type = SF_DATAGRAM;
+      e.a = d->id;
+      if (add (p, &df, 1, &e))
+        break;
+      c->datagrams_sent++;
+      datagram_pop (c);
+    }
+}
+
+static void
+add_streams (gq_conn *c, pk *p)
 {
   size_t i, start;
+
+  /* Streams, starting one further along each time for fairness.  */
+  start = c->n_streams ? c->rr % c->n_streams : 0;
+  for (i = 0; i < c->n_streams; i++)
+    add_stream_control (c, p, c->streams[(start + i) % c->n_streams]);
+  for (i = 0; i < c->n_streams; i++)
+    add_stream_data (c, p, c->streams[(start + i) % c->n_streams]);
+  if (c->n_streams)
+    c->rr = (start + 1) % c->n_streams;
+}
+
+static void
+add_app_frames (gq_conn *c, pk *p)
+{
+  size_t i;
   sent_frame e;
   gq_frame f;
 
@@ -515,34 +562,8 @@ add_app_frames (gq_conn *c, pk *p)
             c->blocked_sent_at = c->max_data_peer + 1;
         }
     }
-  /* Datagrams before stream data: they are the latency sensitive ones.  */
-  while (c->dq_n)
-    {
-      struct dgram *d = datagram_front (c);
-      gq_frame df;
-
-      if (room (p) < 1 + 2 + d->len || p->nsf >= MAX_FRAMES_PER_PACKET)
-        break;
-      memset (&df, 0, sizeof df);
-      df.type = GQ_FRAME_DATAGRAM;
-      df.u.datagram.data.data = d->data;
-      df.u.datagram.data.len = d->len;
-      memset (&e, 0, sizeof e);
-      e.type = SF_DATAGRAM;
-      e.a = d->id;
-      if (add (p, &df, 1, &e))
-        break;
-      c->datagrams_sent++;
-      datagram_pop (c);
-    }
-  /* Streams, starting one further along each time for fairness.  */
-  start = c->n_streams ? c->rr % c->n_streams : 0;
-  for (i = 0; i < c->n_streams; i++)
-    add_stream_control (c, p, c->streams[(start + i) % c->n_streams]);
-  for (i = 0; i < c->n_streams; i++)
-    add_stream_data (c, p, c->streams[(start + i) % c->n_streams]);
-  if (c->n_streams)
-    c->rr = (start + 1) % c->n_streams;
+  add_datagrams (c, p);
+  add_streams (c, p);
 }
 
 /* ---- Packet assembly ---- */
@@ -596,6 +617,38 @@ add_close (gq_conn *c, pk *p)
   p->closing = 1;
 }
 
+/* 0-RTT: the client may send before it has 1-RTT keys.  */
+static int
+early_usable (const gq_conn *c)
+{
+  return c->role == GQ_ROLE_CLIENT && c->have_early_wk && !c->early_rejected
+         && !c->sp[SP_APP].have_wk && c->state == GQ_CONN_HANDSHAKE;
+}
+
+/* A 0-RTT packet: stream data and datagrams only (RFC 9001 section 4.6
+   allows more, but this is all that is worth sending this early).  */
+static int
+assemble_early (gq_conn *c, uint64_t now, size_t budget, pk *p)
+{
+  size_t ov = overhead_of (c, SP_HANDSHAKE);	/* Long header, no token.  */
+
+  (void) now;
+  if (budget < ov + MIN_PACKET_ROOM || !conn_can_send_ae (c))
+    return 0;
+  p->sp = SP_APP;
+  p->early = 1;
+  p->len = 0;
+  p->nsf = 0;
+  p->ae = 0;
+  p->closing = 0;
+  p->challenge = 0;
+  p->cap = budget - ov;
+  p->hdr_est = ov;
+  add_datagrams (c, p);
+  add_streams (c, p);
+  return p->len > 0;
+}
+
 /* Fill P with what SP has to say.  Returns 1 if there is a packet.  */
 static int
 assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
@@ -603,6 +656,9 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
   space *s = &c->sp[sp];
   size_t ov = overhead_of (c, sp);
 
+  p->early = 0;
+  if (sp == SP_APP && early_usable (c))
+    return assemble_early (c, now, budget, p);
   if (budget < ov + MIN_PACKET_ROOM)
     return 0;
   memset (&p->sf, 0, 0);
@@ -647,17 +703,19 @@ assemble (gq_conn *c, int sp, uint64_t now, size_t budget, pk *p)
 /* ---- Sealing ---- */
 
 static size_t
-hdr_len_for (const gq_conn *c, int sp, size_t payload_len, size_t pn_len,
-             uint64_t pn)
+hdr_len_for (const gq_conn *c, int sp, int early, size_t payload_len,
+             size_t pn_len, uint64_t pn)
 {
   uint8_t tmp[128];
   size_t h = 0;
 
-  if (sp == SP_APP)
+  if (sp == SP_APP && !early)
     gq_short_header_build (c->dcid.data, c->dcid.len, 0, c->w_phase, pn,
                            pn_len, tmp, sizeof tmp, &h);
   else
-    gq_long_header_build (sp == SP_INITIAL ? GQ_PKT_INITIAL : GQ_PKT_HANDSHAKE,
+    gq_long_header_build (early ? GQ_PKT_ZERO_RTT
+                          : sp == SP_INITIAL ? GQ_PKT_INITIAL
+                                             : GQ_PKT_HANDSHAKE,
                           c->version, c->dcid.data, c->dcid.len,
                           c->scid_first.data, c->scid_first.len,
                           sp == SP_INITIAL ? c->token : NULL,
@@ -674,12 +732,13 @@ seal (gq_conn *c, uint64_t now, pk *p, uint64_t pn, size_t pn_len, uint8_t *out,
   size_t hdr = 0;
   int r;
 
-  if (p->sp == SP_APP)
+  if (p->sp == SP_APP && !p->early)
     r = gq_short_header_build (c->dcid.data, c->dcid.len, 0, c->w_phase, pn,
                                pn_len, out, cap, &hdr);
   else
-    r = gq_long_header_build (p->sp == SP_INITIAL ? GQ_PKT_INITIAL
-                                                  : GQ_PKT_HANDSHAKE,
+    r = gq_long_header_build (p->early ? GQ_PKT_ZERO_RTT
+                              : p->sp == SP_INITIAL ? GQ_PKT_INITIAL
+                                                    : GQ_PKT_HANDSHAKE,
                               c->version, c->dcid.data, c->dcid.len,
                               c->scid_first.data, c->scid_first.len,
                               p->sp == SP_INITIAL ? c->token : NULL,
@@ -690,8 +749,8 @@ seal (gq_conn *c, uint64_t now, pk *p, uint64_t pn, size_t pn_len, uint8_t *out,
   if (hdr + p->len + GQ_AEAD_TAG_LEN > cap)
     return GQ_ERR_BUFSIZE;
   memcpy (out + hdr, p->pl, p->len);
-  r = gq_packet_seal (&s->wk, pn, out, hdr - pn_len, pn_len, p->len, cap,
-                      out_len);
+  r = gq_packet_seal (p->early ? &c->early_wk : &s->wk, pn, out,
+                      hdr - pn_len, pn_len, p->len, cap, out_len);
   (void) now;
   return r;
 }
@@ -715,7 +774,8 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
         {
           t = 0;
           for (i = 0; i < n; i++)
-            t += hdr_len_for (c, pks[i]->sp, pks[i]->len, pnl[i], pns[i])
+            t += hdr_len_for (c, pks[i]->sp, pks[i]->early, pks[i]->len, pnl[i],
+                         pns[i])
                  + pks[i]->len + GQ_AEAD_TAG_LEN;
           if (t >= GQ_MIN_INITIAL_DATAGRAM)
             break;
@@ -754,6 +814,7 @@ finish_datagram (gq_conn *c, uint64_t now, pk **pks, const uint64_t *pns,
           sp.size = (uint32_t) w;
           sp.ack_eliciting = 1;
           sp.in_flight = 1;
+          sp.early = (uint8_t) p->early;
           if (p->nsf)
             {
               sp.frames = malloc (p->nsf * sizeof *sp.frames);
@@ -921,7 +982,7 @@ conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,
       pk *p = &storage[n];
       space *s = &c->sp[sp];
 
-      if (s->discarded || !s->have_wk)
+      if (s->discarded || (!s->have_wk && !(sp == SP_APP && early_usable (c))))
         continue;
       if (est + 1 >= maxdg)
         break;

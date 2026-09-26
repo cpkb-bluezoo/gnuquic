@@ -586,6 +586,10 @@ sink_peer_params (void *user, const uint8_t *data, size_t len)
   gq_conn *c = user;
   int r;
 
+  c->peer_tp_raw_len = len <= sizeof c->peer_tp_raw ? len : 0;
+  if (c->peer_tp_raw_len)
+    memcpy (c->peer_tp_raw, data, len);
+  c->early_provisional = 0;
   r = gq_tp_decode (data, len,
                     c->role == GQ_ROLE_CLIENT ? GQ_ROLE_SERVER
                                               : GQ_ROLE_CLIENT,
@@ -611,6 +615,7 @@ sink_complete (void *user, const gq_tls_info *info)
   gq_conn *c = user;
 
   c->handshake_complete = 1;
+  c->early_rk_deadline = c->now + 3 * conn_pto_base (c, SP_APP);
   if (c->role == GQ_ROLE_SERVER)
     {
       c->handshake_done_pending = 1;
@@ -620,6 +625,18 @@ sink_complete (void *user, const gq_tls_info *info)
     }
   conn_notify_connected (c, info);
   return 0;
+}
+
+static int
+sink_early_data (void *user, int accepted)
+{
+  gq_conn *c = user;
+
+  if (accepted)
+    conn_early_accepted (c);
+  else
+    conn_early_rejected (c);
+  return c->state >= GQ_CONN_CLOSING;
 }
 
 static int
@@ -650,6 +667,7 @@ make_sink (gq_conn *c, gq_tls_sink *k)
   k->secret = sink_secret;
   k->peer_params = sink_peer_params;
   k->ticket = sink_ticket;
+  k->early_data = sink_early_data;
   k->complete = sink_complete;
   k->alert = sink_alert;
 }
@@ -852,6 +870,21 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
       c->cfg.n_versions++;
     }
   c->ctls = *tls;
+  if (tls->resume && tls->early_data && c->cfg.resume_params
+      && c->cfg.resume_params_len
+      && gq_tp_decode (c->cfg.resume_params, c->cfg.resume_params_len,
+                       GQ_ROLE_SERVER, &c->resume_tp) == GQ_OK)
+    {
+      /* Until the server's own parameters arrive, the remembered ones
+         stand in for them (RFC 9000 section 7.4.1).  */
+      c->early_offered = 1;
+      c->early_provisional = 1;
+      c->peer_tp = c->resume_tp;
+      c->have_peer_tp = 1;
+      c->max_data_peer = c->resume_tp.initial_max_data;
+      c->max_streams_peer[1] = c->resume_tp.initial_max_streams_bidi;
+      c->max_streams_peer[0] = c->resume_tp.initial_max_streams_uni;
+    }
   r = client_setup (c, 1);
   if (r != GQ_OK)
     {
@@ -1048,6 +1081,33 @@ int
 gq_conn_is_established (const gq_conn *c)
 {
   return c->state == GQ_CONN_ESTABLISHED;
+}
+
+int
+gq_conn_get_peer_params (const gq_conn *c, uint8_t *out, size_t cap,
+                         size_t *len)
+{
+  if (c->peer_tp_raw_len == 0)
+    return GQ_ERR_UNAVAILABLE;
+  if (cap < c->peer_tp_raw_len)
+    return GQ_ERR_BUFSIZE;
+  memcpy (out, c->peer_tp_raw, c->peer_tp_raw_len);
+  *len = c->peer_tp_raw_len;
+  return GQ_OK;
+}
+
+int
+gq_conn_early_data_active (const gq_conn *c)
+{
+  return c->rx_early;
+}
+
+int
+gq_conn_early_data_accepted (const gq_conn *c)
+{
+  if (!c->early_offered || (!c->early_accepted && !c->early_rejected))
+    return -1;
+  return c->early_accepted;
 }
 
 uint32_t

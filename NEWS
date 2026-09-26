@@ -3,6 +3,15 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** 0-RTT (RFC 9001 section 4.6): a client that resumes a session sends
+stream data and datagrams in its first flight under the remembered server
+limits; a server accepts them once per ticket (single use replay cache)
+and tells the application when data is early (gq_conn_early_data_active).
+Rejected early data is sent again in 1-RTT packets; a server that
+tightened its limits is refused. The endpoint can keep the ticket keys
+and replay cache. Tested in simulation (loss, reordering, v1 and v2) and
+against quiche in both directions. Also fixes the client's early
+traffic secret emission in the TLS engine, which was never defined.
 ** DATAGRAM frames (RFC 9221) with acknowledgement and loss notification,
 and the endpoint layer (endpoint.h): connections behind one socket are
 routed by connection ID, new clients are admitted (Version Negotiation,
