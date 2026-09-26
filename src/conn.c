@@ -203,6 +203,7 @@ conn_discard_space (gq_conn *c, int sp)
   gq_packet_keys_wipe (&s->wk);
   sp_sent_clear (c, sp);
   gq_ranges_free (&s->recv);
+  gq_ranges_free (&s->acked_pns);
   gq_sstream_free (&s->cs);
   gq_rstream_free (&s->cr);
   s->ack_pending = s->ack_now = 0;
@@ -475,9 +476,11 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
       space *s = &c->sp[i];
 
       gq_ranges_init (&s->recv, 64);
+      gq_ranges_init (&s->acked_pns, 32);
       gq_sstream_init (&s->cs, CRYPTO_BUFFER, UINT64_MAX);
       gq_rstream_init (&s->cr, CRYPTO_BUFFER);
     }
+  cc_init (c);
   conn_recompute_idle (c, now);
   /* Our first connection ID.  */
   if (conn_new_lcid (c, 1) != GQ_OK)
@@ -630,6 +633,7 @@ gq_conn_free (gq_conn *c)
       sp_sent_clear (c, i);
       free (s->sent);
       gq_ranges_free (&s->recv);
+      gq_ranges_free (&s->acked_pns);
       gq_sstream_free (&s->cs);
       gq_rstream_free (&s->cr);
       gq_packet_keys_wipe (&s->rk);
@@ -678,6 +682,9 @@ gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st)
   st->min_rtt_us = c->min_rtt;
   st->rttvar_us = c->rttvar;
   st->bytes_in_flight = c->bytes_in_flight;
+  st->cwnd = c->cwnd;
+  st->ssthresh = c->ssthresh;
+  st->congestion_events = c->congestion_events;
   st->pto_count = c->pto_count;
   st->key_updates = c->key_updates;
 }

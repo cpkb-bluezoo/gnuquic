@@ -72,10 +72,11 @@ Pre-alpha.  What exists today:
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle
-           timeout, close and stateless reset; interoperating with quiche
+           timeout, close and stateless reset; NewReno congestion control
+           (RFC 9002 section 7); interoperating with quiche
 
-Not yet written: congestion control (a fixed cap on bytes in flight
-stands in), address validation tokens and Retry, Version Negotiation
+Not yet written: pacing and ECN, address validation tokens and Retry,
+Version Negotiation
 and RFC 9368, 0-RTT early data, path validation and migration, DATAGRAM,
 and the endpoint layer that routes datagrams to connections.  See the
 manual (doc/gnuquic.texi) for the design, security policy and roadmap.

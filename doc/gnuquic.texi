@@ -674,7 +674,8 @@ packets are protected and deprotected in place; coalesced packets are
 handled; duplicates are dropped by packet number.  ACKs are sent at once
 for the handshake spaces and after two packets or 25 ms otherwise (at
 once on a gap).  Loss detection follows RFC 9002 (packet and time
-thresholds, probe timeouts with back-off); what a lost packet carried is
+thresholds, probe timeouts with back-off) and the NewReno controller
+of RFC 9002 section 7 limits what is in flight; what a lost packet carried is
 put back on the queues frame by frame.  A server obeys the
 anti-amplification limit and pads datagrams that carry ack-eliciting
 Initial packets to 1200 bytes; a client pads all its Initial datagrams.
@@ -682,7 +683,7 @@ Keys are discarded as the handshake progresses, and the 1-RTT keys are
 updated on request, when the peer updates, and before the AEAD limit.
 
 @heading Limits of this step
-Congestion control, Retry and address validation tokens, Version
+Pacing and ECN, Retry and address validation tokens, Version
 Negotiation, 0-RTT, path validation and migration, and DATAGRAM are not
 implemented yet, and a server needs an endpoint layer above it to route
 datagrams by connection ID (the connection reports the IDs it issues
@@ -781,9 +782,10 @@ Verified by simulated-network tests (loss, reordering, corruption, tight
 flow control) and against quiche in both directions.
 
 @item
-Congestion control (RFC 9002 section 7), pacing and ECN.  Until it
-exists the amount in flight is capped by a fixed constant, which is not
-safe on a shared network.
+@strong{Done.}  Congestion control: NewReno as in RFC 9002 section 7
+(slow start, congestion avoidance, recovery periods, persistent
+congestion, window growth only while the window is in use).  Still open:
+pacing, ECN, and a pluggable controller (CUBIC, BBR).
 
 @item
 Address validation: Retry, NEW_TOKEN tokens, and RFC 9368 version

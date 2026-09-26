@@ -41,8 +41,10 @@
    synchronously inside the call that caused them and must not call
    gq_conn_free; they may call the stream functions.
 
-   Not done here (later steps): congestion control (the amount in flight
-   is capped by a fixed window until it is added), address validation
+   Congestion control is NewReno as in RFC 9002 section 7, without
+   pacing or ECN.
+
+   Not done here (later steps): address validation
    tokens and Retry, version negotiation handling, 0-RTT, path validation
    and migration, DATAGRAM frames, and the endpoint layer that routes
    datagrams to connections.  */
@@ -255,6 +257,8 @@ typedef struct gq_conn_stats
   uint64_t bytes_sent, bytes_received;
   uint64_t srtt_us, min_rtt_us, rttvar_us;
   uint64_t bytes_in_flight;
+  uint64_t cwnd, ssthresh;		/* Congestion controller state.  */
+  uint64_t congestion_events;
   uint64_t key_updates;
   unsigned pto_count;
 } gq_conn_stats;

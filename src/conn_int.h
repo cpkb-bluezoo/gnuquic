@@ -39,8 +39,11 @@ enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 #define K_GRANULARITY 1000u
 #define K_INITIAL_RTT 333000u
 #define K_PACKET_THRESHOLD 3
-/* Until congestion control exists: packets in flight are capped.  */
-#define MAX_BYTES_IN_FLIGHT (2u * 1024 * 1024)
+/* RFC 9002 section 7 (NewReno) constants.  */
+#define CC_MAX_DATAGRAM 1200u
+#define CC_INITIAL_WINDOW (10u * CC_MAX_DATAGRAM)
+#define CC_MIN_WINDOW (2u * CC_MAX_DATAGRAM)
+#define K_PERSISTENT_CONGESTION_THRESHOLD 3
 #define MAX_FRAMES_PER_PACKET 48
 #define MAX_LCID 8
 #define MAX_PCID 16
@@ -94,6 +97,7 @@ typedef struct space
   size_t n_sent, cap_sent;
   uint64_t loss_time;		/* 0: none.  */
   uint64_t last_ae_time;	/* Time of the last ack-eliciting send.  */
+  gq_ranges acked_pns;		/* Recently acknowledged packet numbers.  */
   uint64_t recv_floor;		/* Packet numbers below this count as seen.  */
   unsigned ae_in_flight;	/* Ack-eliciting packets outstanding.  */
   unsigned probes;		/* Probe packets still to send.  */
@@ -194,6 +198,10 @@ struct gq_conn
   /* Amplification and totals.  */
   uint64_t bytes_recv, bytes_sent;
   uint64_t bytes_in_flight;
+  uint64_t cwnd, ssthresh;	/* Congestion window and threshold.  */
+  uint64_t recovery_start;	/* Send time that ends recovery; 0: none.  */
+  uint64_t ca_acked;		/* Bytes acked in congestion avoidance.  */
+  uint64_t congestion_events;
   gq_conn_stats st;
 
   /* Flow control.  */
@@ -255,6 +263,7 @@ void on_loss_timeout (gq_conn *c, uint64_t now);
 void requeue_frames (gq_conn *c, int sp, sent_pkt *p);
 uint64_t pto_interval (const gq_conn *c, int sp);
 int conn_can_send_ae (const gq_conn *c);
+void cc_init (gq_conn *c);
 
 /* conn_stream.c */
 stream *stream_find (const gq_conn *c, uint64_t id);

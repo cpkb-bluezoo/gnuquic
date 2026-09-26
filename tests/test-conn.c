@@ -92,6 +92,9 @@ struct net
   struct app *app[2];
   int dropped;
   int drop_index;		/* Drop this datagram only (or -1).  */
+  /* Congestion controller observations, sender side of stream 0.  */
+  int64_t max_over;
+  uint64_t max_cwnd, min_cwnd, events;
 };
 
 static uint32_t
@@ -308,6 +311,19 @@ flush (struct net *n)
 
       if (a == NULL || a->c == NULL)
         continue;
+      {
+        gq_conn_stats st;
+
+        gq_conn_get_stats (a->c, &st);
+        if ((int64_t) st.bytes_in_flight - (int64_t) st.cwnd > n->max_over)
+          n->max_over = (int64_t) st.bytes_in_flight - (int64_t) st.cwnd;
+        if (st.cwnd > n->max_cwnd)
+          n->max_cwnd = st.cwnd;
+        if (st.cwnd < n->min_cwnd || n->min_cwnd == 0)
+          n->min_cwnd = st.cwnd;
+        if (st.congestion_events > n->events)
+          n->events = st.congestion_events;
+      }
       while (guard++ < 200)
         {
           CHECK_EQ (gq_conn_send (a->c, n->now, buf, sizeof buf, &len), GQ_OK);
@@ -361,7 +377,9 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
         {
           struct pkt p = n->q[best];
 
-          n->q[best] = n->q[--n->nq];
+          memmove (&n->q[best], &n->q[best + 1],
+                   (size_t) (n->nq - best - 1) * sizeof n->q[0]);
+          n->nq--;
           /* Keep delivery order stable among equal times.  */
           gq_conn_recv (n->app[p.to]->c, n->now, p.d, p.len);
           continue;
@@ -543,6 +561,69 @@ test_requests (unsigned loss, uint32_t seed, int nreq, size_t req,
       CHECK (p->cli.sb[i].closed);
   CHECK_EQ (p->cli.closed, 0);
   CHECK_EQ (p->srv.closed, 0);
+  pair_free (p);
+}
+
+/* The server sends SIZE bytes; LOSS_PCT random loss, and optionally a
+   blackout of BLACKOUT_US starting once BLACKOUT_AT bytes have arrived.  */
+static void
+test_congestion (size_t size, unsigned loss, uint64_t blackout_at,
+                 uint64_t blackout_us, int expect_events, int expect_min)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  uint64_t id, until = 0, deadline;
+  struct sbuf *s;
+  int done = 0;
+
+  if (getenv ("QDBG"))
+    fprintf (stderr, "--- congestion size=%zu loss=%u\n", size, loss);
+  memset (&cfg, 0, sizeof cfg);
+  cfg.initial_max_data = 100u << 20;
+  cfg.initial_max_stream_data = 100u << 20;
+  p = pair_new (&cfg, &cfg, 0, 21);
+  p->srv.respond = size;
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 500000);
+  p->net.min_cwnd = 0;
+  p->net.max_cwnd = 0;
+  p->net.loss_pct = loss;
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 10;
+  s->out_fin = 1;
+  deadline = p->net.now + 300000000;
+  while (p->net.now < deadline && !done)
+    {
+      run (&p->net, NULL, 20000);
+      if (blackout_us && !until && s->n >= blackout_at)
+        {
+          until = p->net.now + blackout_us;
+          p->net.loss_pct = 100;
+        }
+      if (until && p->net.now >= until)
+        {
+          p->net.loss_pct = loss;
+          until = 0;
+          blackout_us = 0;
+        }
+      done = s->fin && s->n == size;
+    }
+  CHECK (done);
+  CHECK_EQ (p->cli.bad, 0);
+  /* The window starts at ten datagrams, grows, and never lets more than one
+     datagram beyond it into flight.  */
+  CHECK (p->net.max_cwnd > 12000);
+  if (!loss && !blackout_us)
+    CHECK (p->net.max_over < 1200);
+  if (expect_events)
+    CHECK (p->net.events > 0);
+  else
+    CHECK_EQ (p->net.events, 0);
+  if (expect_min)
+    CHECK_EQ (p->net.min_cwnd, 2400);
+  else
+    CHECK (p->net.min_cwnd > 2400);
   pair_free (p);
 }
 
@@ -736,6 +817,9 @@ main (void)
     small.send_buffer = 4000;
     test_requests (10, 15, 12, 30, 90000, &small, &small, 0);
   }
+  test_congestion (2000000, 0, 0, 0, 0, 0);
+  test_congestion (2000000, 3, 0, 0, 1, 0);
+  test_congestion (4000000, 0, 1000000, 3000000, 1, 1);
   test_close ();
   test_idle ();
   test_streams_misc ();
