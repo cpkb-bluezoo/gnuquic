@@ -52,6 +52,7 @@ Documentation License''.
 * Security policy::       What is negotiated, and what is absent.
 * Early data::            0-RTT and its anti-replay rules.
 * QUIC connections::      Connection and stream state.
+* Address validation::    Retry, tokens and the admission step.
 * Roadmap::               Implementation status and plans.
 * Internationalization::  Message catalogues and the translation domain.
 * GNU Free Documentation License::  Copying this manual.
@@ -683,13 +684,42 @@ Keys are discarded as the handshake progresses, and the 1-RTT keys are
 updated on request, when the peer updates, and before the AEAD limit.
 
 @heading Limits of this step
-Pacing and ECN, Retry and address validation tokens, Version
-Negotiation, 0-RTT, path validation and migration, and DATAGRAM are not
+Pacing and ECN, the client's Version Negotiation handling, 0-RTT, path validation and migration, and DATAGRAM are not
 implemented yet, and a server needs an endpoint layer above it to route
 datagrams by connection ID (the connection reports the IDs it issues
 through @code{cid_issued}).  The receiving side treats a few limits as
 fixed: 64 tracked packet number ranges per space and 8 connection IDs
 in each direction.
+
+@node Address validation
+@chapter Address validation
+
+@cindex Retry
+@cindex token, address validation
+A server that answers an unvalidated client may send at most three times
+what it received.  A client proves its address by returning a token.
+@file{token.h} makes and checks tokens: AES-256-GCM under a rotating
+key, with the client's address as associated data, an issue time, and for
+Retry the client's original destination ID and the ID the server chose.
+Nothing is stored server side.
+
+@file{listen.h} is the stateless step before a connection exists.
+@code{gq_quic_admit} looks at a datagram for an unknown connection ID and
+decides: drop it, reply (Version Negotiation for an unknown version, or a
+Retry when @code{require_retry} is set and no valid token came with it),
+or accept, filling a @code{gq_conn_accept} for
+@code{gq_conn_server_accept}.  A valid token of either kind marks the
+client validated.  A connection created after a Retry uses the ID the
+Retry chose and reports the original in its transport parameters.  Once
+the handshake completes, a connection created with token keys sends
+NEW_TOKEN for the client to use next time (the client receives it through
+the @code{new_token} event and passes it as @code{token} in its
+configuration).
+
+The client follows a Retry automatically: it verifies the integrity tag,
+keeps the token, switches to the new destination ID and Initial keys and
+sends its first flight again.  It accepts one Retry, and only before
+hearing anything else from the server.
 
 @node Roadmap
 @chapter Roadmap
@@ -788,8 +818,10 @@ congestion, window growth only while the window is in use).  Still open:
 pacing, ECN, and a pluggable controller (CUBIC, BBR).
 
 @item
-Address validation: Retry, NEW_TOKEN tokens, and RFC 9368 version
-information with Version Negotiation.
+@strong{Done.}  Address validation (@ref{Address validation}): Retry and
+NEW_TOKEN tokens, the stateless admission step, and the client's handling
+of Retry.  Still open: the client's handling of Version Negotiation and
+RFC 9368 version information.
 
 @item
 0-RTT wiring, path validation and migration, DATAGRAM (RFC 9221), and the

@@ -22,6 +22,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "conn_int.h"
 
@@ -79,8 +80,16 @@ conn_recompute_idle (gq_conn *c, uint64_t now)
 
 /* ---- Connection IDs ---- */
 
-int
-conn_new_lcid (gq_conn *c, int announced)
+uint64_t
+conn_wall_seconds (const gq_conn *c)
+{
+  if (c->cfg.wall_seconds)
+    return c->cfg.wall_seconds (c->cfg.wall_user);
+  return (uint64_t) time (NULL);
+}
+
+static int
+new_lcid (gq_conn *c, int announced, const gq_cid *fixed)
 {
   size_t i;
   lcid *l = NULL;
@@ -97,7 +106,9 @@ conn_new_lcid (gq_conn *c, int announced)
   l->used = 1;
   l->seq = c->next_lseq++;
   l->cid.len = (uint8_t) c->cfg.cid_len;
-  if (gq_random (l->cid.data, l->cid.len) != GQ_OK
+  if (fixed)
+    l->cid = *fixed;
+  if ((!fixed && gq_random (l->cid.data, l->cid.len) != GQ_OK)
       || gq_random (l->token, sizeof l->token) != GQ_OK)
     {
       l->used = 0;
@@ -108,6 +119,12 @@ conn_new_lcid (gq_conn *c, int announced)
   if (c->ev.cid_issued)
     c->ev.cid_issued (c->ev.user, l->cid.data, l->cid.len, l->token);
   return GQ_OK;
+}
+
+int
+conn_new_lcid (gq_conn *c, int announced)
+{
+  return new_lcid (c, announced, NULL);
 }
 
 /* ---- Failure and closing ---- */
@@ -269,6 +286,11 @@ local_params (gq_conn *c, gq_transport_params *tp)
       gq_tp_set_present (tp, GQ_TP_ORIGINAL_DESTINATION_CONNECTION_ID);
       memcpy (tp->stateless_reset_token, c->l[0].token, GQ_RESET_TOKEN_LEN);
       gq_tp_set_present (tp, GQ_TP_STATELESS_RESET_TOKEN);
+      if (c->retried)
+        {
+          tp->retry_source_connection_id = c->retry_scid;
+          gq_tp_set_present (tp, GQ_TP_RETRY_SOURCE_CONNECTION_ID);
+        }
     }
 }
 
@@ -290,6 +312,12 @@ conn_apply_peer_params (gq_conn *c)
   if (c->role == GQ_ROLE_CLIENT
       && (!gq_tp_has (p, GQ_TP_ORIGINAL_DESTINATION_CONNECTION_ID)
           || !cid_equal (&p->original_destination_connection_id, &c->odcid)))
+    return GQ_ERR_PROTOCOL;
+  if (c->role == GQ_ROLE_CLIENT
+      && (c->retried
+          ? (!gq_tp_has (p, GQ_TP_RETRY_SOURCE_CONNECTION_ID)
+             || !cid_equal (&p->retry_source_connection_id, &c->retry_scid))
+          : gq_tp_has (p, GQ_TP_RETRY_SOURCE_CONNECTION_ID)))
     return GQ_ERR_PROTOCOL;
   c->have_peer_tp = 1;
   c->max_data_peer = p->initial_max_data;
@@ -370,6 +398,8 @@ sink_complete (void *user, const gq_tls_info *info)
   if (c->role == GQ_ROLE_SERVER)
     {
       c->handshake_done_pending = 1;
+      if (c->token_keys && c->addr_len)
+        c->new_token_pending = 1;
       conn_maybe_confirm (c);
     }
   conn_notify_connected (c, info);
@@ -445,7 +475,7 @@ fill_defaults (gq_conn_config *g)
 
 static gq_conn *
 conn_alloc (enum gq_role role, const gq_conn_config *config,
-            const gq_conn_events *events, uint64_t now)
+            const gq_conn_events *events, uint64_t now, const gq_cid *fixed)
 {
   gq_conn *c = calloc (1, sizeof *c);
   int i;
@@ -483,7 +513,7 @@ conn_alloc (enum gq_role role, const gq_conn_config *config,
   cc_init (c);
   conn_recompute_idle (c, now);
   /* Our first connection ID.  */
-  if (conn_new_lcid (c, 1) != GQ_OK)
+  if (new_lcid (c, 1, fixed) != GQ_OK)
     {
       gq_conn_free (c);
       return NULL;
@@ -516,7 +546,7 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
   if (out == NULL || tls == NULL || tls->n_alpn == 0)
     return GQ_ERR_INVAL;
   *out = NULL;
-  c = conn_alloc (GQ_ROLE_CLIENT, config, events, now_us);
+  c = conn_alloc (GQ_ROLE_CLIENT, config, events, now_us, NULL);
   if (c == NULL)
     return GQ_ERR_NOMEM;
   if (!gq_version_supported (c->version))
@@ -532,8 +562,14 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
       return GQ_ERR_CRYPTO;
     }
   c->dcid = c->odcid;
+  c->initial_dcid = c->odcid;
   c->dcid_set = 1;
   c->p[0].cid = c->odcid;
+  if (c->cfg.token && c->cfg.token_len && c->cfg.token_len <= sizeof c->token)
+    {
+      memcpy (c->token, c->cfg.token, c->cfg.token_len);
+      c->token_len = c->cfg.token_len;
+    }
   r = gq_packet_keys_initial (c->version, c->odcid.data, c->odcid.len, &ck,
                               &sk);
   if (r != GQ_OK)
@@ -563,16 +599,18 @@ gq_conn_client_new (gq_conn **out, const gq_conn_config *config,
 }
 
 int
-gq_conn_server_new (gq_conn **out, const gq_conn_config *config,
-                    const gq_tls_server_config *tls,
-                    const gq_conn_events *events, uint64_t now_us)
+gq_conn_server_accept (gq_conn **out, const gq_conn_config *config,
+                       const gq_tls_server_config *tls,
+                       const gq_conn_events *events, uint64_t now_us,
+                       const gq_conn_accept *acc)
 {
   gq_conn *c;
 
   if (out == NULL || tls == NULL || tls->n_alpn == 0)
     return GQ_ERR_INVAL;
   *out = NULL;
-  c = conn_alloc (GQ_ROLE_SERVER, config, events, now_us);
+  c = conn_alloc (GQ_ROLE_SERVER, config, events, now_us,
+                  acc && acc->retry_scid.len ? &acc->retry_scid : NULL);
   if (c == NULL)
     return GQ_ERR_NOMEM;
   if (!gq_version_supported (c->version))
@@ -581,8 +619,32 @@ gq_conn_server_new (gq_conn **out, const gq_conn_config *config,
       return GQ_ERR_UNSUPPORTED;
     }
   c->stls = *tls;
+  if (acc)
+    {
+      c->peer_addr_validated = acc->validated != 0;
+      if (acc->retry_scid.len)
+        {
+          c->retried = 1;
+          c->retry_scid = acc->retry_scid;
+          c->odcid = acc->odcid;
+        }
+      if (acc->token_keys && acc->addr_len <= sizeof c->addr)
+        {
+          c->token_keys = acc->token_keys;
+          memcpy (c->addr, acc->addr, acc->addr_len);
+          c->addr_len = acc->addr_len;
+        }
+    }
   *out = c;
   return GQ_OK;
+}
+
+int
+gq_conn_server_new (gq_conn **out, const gq_conn_config *config,
+                    const gq_tls_server_config *tls,
+                    const gq_conn_events *events, uint64_t now_us)
+{
+  return gq_conn_server_accept (out, config, tls, events, now_us, NULL);
 }
 
 /* Server: the first Initial arrived.  Derive its keys and start TLS.  */
@@ -594,8 +656,10 @@ conn_server_start (gq_conn *c, const uint8_t *odcid, size_t odcid_len,
   gq_packet_keys ck, sk;
   int r;
 
-  c->odcid.len = (uint8_t) odcid_len;
-  memcpy (c->odcid.data, odcid, odcid_len);
+  c->initial_dcid.len = (uint8_t) odcid_len;
+  memcpy (c->initial_dcid.data, odcid, odcid_len);
+  if (!c->retried)
+    c->odcid = c->initial_dcid;
   c->dcid.len = (uint8_t) client_scid_len;
   memcpy (c->dcid.data, client_scid, client_scid_len);
   c->dcid_set = 1;
@@ -670,8 +734,8 @@ gq_conn_version (const gq_conn *c)
 const uint8_t *
 gq_conn_initial_dcid (const gq_conn *c, size_t *len)
 {
-  *len = c->odcid.len;
-  return c->odcid.data;
+  *len = c->initial_dcid.len;
+  return c->initial_dcid.data;
 }
 
 void

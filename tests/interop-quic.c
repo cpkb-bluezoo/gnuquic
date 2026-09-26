@@ -49,6 +49,7 @@
 
 #include <gnuquic/status.h>
 #include <gnuquic/conn.h>
+#include <gnuquic/listen.h>
 
 #include "interop-util.h"
 
@@ -83,6 +84,8 @@ struct app
   size_t expected;
   gq_conn_events ev;
   gq_conn_config cfg;
+  int retry;
+  gq_token_keys keys;
 };
 
 static uint64_t
@@ -374,10 +377,34 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
             {
               if (a->server && a->c == NULL)
                 {
+                  gq_admit_config ac;
+                  gq_conn_accept acc;
+                  uint8_t reply[1500], key[20];
+                  size_t rl = 0, kl = 0;
+                  int act;
+                  struct sockaddr_in *sin = (struct sockaddr_in *) &from;
+
+                  memset (&ac, 0, sizeof ac);
+                  ac.require_retry = a->retry;
+                  memcpy (key, &sin->sin_addr, 4);
+                  memcpy (key + 4, &sin->sin_port, 2);
+                  kl = 6;
+                  act = gq_quic_admit (&a->keys, &ac, key, kl, buf, (size_t) n,
+                                       (uint64_t) time (NULL), reply,
+                                       sizeof reply, &rl, &acc);
+                  if (act == GQ_ADMIT_REPLY)
+                    {
+                      sendto (a->fd, reply, rl, 0, (struct sockaddr *) &from,
+                              fl);
+                      continue;
+                    }
+                  if (act != GQ_ADMIT_ACCEPT)
+                    continue;
                   a->peer = from;
                   a->plen = fl;
                   a->have_peer = 1;
-                  if (new_conn (a, g) != GQ_OK)
+                  if (gq_conn_server_accept (&a->c, &a->cfg, &g->sc, &a->ev,
+                                             now_us (), &acc) != GQ_OK)
                     return 1;
                 }
               if (a->c)
@@ -443,6 +470,7 @@ main (int argc, char **argv)
       else if (!strcmp (o, "--timeout") && v) timeout = atoi (v), i++;
       else if (!strcmp (o, "--connections") && v) connections = atoi (v), i++;
       else if (!strcmp (o, "--v2")) a.v2 = 1;
+      else if (!strcmp (o, "--retry")) a.retry = 1;
       else if (!strcmp (o, "--key-update")) a.key_update = 1;
       else if (o[0] != '-' && npaths < 64) paths[npaths++] = o;
       else
@@ -452,6 +480,7 @@ main (int argc, char **argv)
         }
     }
   signal (SIGPIPE, SIG_IGN);
+  gq_token_keys_init (&a.keys);
   a.cfg.version = a.v2 ? GQ_VERSION_2 : 0;
   a.ev.user = &a;
   a.ev.connected = ev_connected;

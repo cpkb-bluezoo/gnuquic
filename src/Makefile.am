@@ -36,6 +36,7 @@ libgnuquic_la_SOURCES = \
   packet.c \
   policy.c \
   protect.c \
+  listen.c \
   ranges.c \
   conn.c \
   conn_loss.c \
@@ -43,6 +44,7 @@ libgnuquic_la_SOURCES = \
   conn_send.c \
   conn_stream.c \
   stream.c \
+  token.c \
   record.c \
   record12.c \
   replay.c \
@@ -90,8 +92,10 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/policy.h \
   $(top_srcdir)/include/gnuquic/protect.h \
   $(top_srcdir)/include/gnuquic/conn.h \
+  $(top_srcdir)/include/gnuquic/listen.h \
   $(top_srcdir)/include/gnuquic/ranges.h \
   $(top_srcdir)/include/gnuquic/stream.h \
+  $(top_srcdir)/include/gnuquic/token.h \
   $(top_srcdir)/include/gnuquic/record.h \
   $(top_srcdir)/include/gnuquic/record12.h \
   $(top_srcdir)/include/gnuquic/replay.h \

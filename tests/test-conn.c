@@ -26,6 +26,8 @@
 
 #include <gnuquic/status.h>
 #include <gnuquic/conn.h>
+#include <gnuquic/listen.h>
+#include <gnuquic/packet.h>
 
 #include "tst-util.h"
 
@@ -70,6 +72,9 @@ struct app
   size_t respond;		/* Server: bytes to answer each request with.  */
   size_t total_in;
   gq_tls_info info;
+  uint8_t token[512];
+  size_t token_len;
+  int tokens;
 };
 
 struct pkt
@@ -92,6 +97,12 @@ struct net
   struct app *app[2];
   int dropped;
   int drop_index;		/* Drop this datagram only (or -1).  */
+  /* Server admission (NULL keys: the server exists from the start).  */
+  gq_token_keys *keys;
+  gq_admit_config admit;
+  uint8_t addr[6];
+  int replies, accepts;
+  int (*make_srv) (struct net *, const gq_conn_accept *);
   /* Congestion controller observations, sender side of stream 0.  */
   int64_t max_over;
   uint64_t max_cwnd, min_cwnd, events;
@@ -203,6 +214,17 @@ ev_stream_closed (void *u, uint64_t id)
 }
 
 static void
+ev_new_token (void *u, const uint8_t *t, size_t n)
+{
+  struct app *a = u;
+
+  CHECK (n <= sizeof a->token);
+  memcpy (a->token, t, n);
+  a->token_len = n;
+  a->tokens++;
+}
+
+static void
 ev_closed (void *u, const gq_conn_close_info *i)
 {
   struct app *a = u;
@@ -237,7 +259,7 @@ pump (struct app *a)
 {
   int i;
 
-  if (a->closed || gq_conn_state (a->c) >= GQ_CONN_CLOSING)
+  if (a->c == NULL || a->closed || gq_conn_state (a->c) >= GQ_CONN_CLOSING)
     return;
   for (i = 0; i < MAXS; i++)
     {
@@ -380,8 +402,31 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
           memmove (&n->q[best], &n->q[best + 1],
                    (size_t) (n->nq - best - 1) * sizeof n->q[0]);
           n->nq--;
-          /* Keep delivery order stable among equal times.  */
-          gq_conn_recv (n->app[p.to]->c, n->now, p.d, p.len);
+          if (p.to == 1 && n->app[1]->c == NULL && n->keys)
+            {
+              uint8_t reply[1500];
+              size_t rl = 0;
+              gq_conn_accept acc;
+              int act = gq_quic_admit (n->keys, &n->admit, n->addr,
+                                       sizeof n->addr, p.d, p.len,
+                                       n->now / 1000000, reply, sizeof reply,
+                                       &rl, &acc);
+
+              if (act == GQ_ADMIT_REPLY)
+                {
+                  n->replies++;
+                  enqueue (n, 1, reply, rl);
+                }
+              else if (act == GQ_ADMIT_ACCEPT)
+                {
+                  n->accepts++;
+                  CHECK_EQ (n->make_srv (n, &acc), GQ_OK);
+                  gq_conn_recv (n->app[1]->c, n->now, p.d, p.len);
+                }
+              continue;
+            }
+          if (n->app[p.to]->c)
+            gq_conn_recv (n->app[p.to]->c, n->now, p.d, p.len);
           continue;
         }
       for (s = 0; s < 2; s++)
@@ -408,6 +453,8 @@ struct pair
   gq_tls_config ccfg;
   gq_tls_server_config scfg;
   gq_conn_events cev, sev;
+  gq_conn_config scfg_conn;
+  gq_token_keys keys;
 };
 
 static void
@@ -424,6 +471,7 @@ fill_events (gq_conn_events *e, struct app *a)
   e->closed = ev_closed;
   e->cid_issued = ev_cid;
   e->cid_retired = ev_cid_retired;
+  e->new_token = ev_new_token;
 }
 
 static struct pair *
@@ -456,6 +504,65 @@ pair_new (const gq_conn_config *ccfg, const gq_conn_config *scfg,
   CHECK_EQ (gq_conn_client_new (&p->cli.c, ccfg, &p->ccfg, &p->cev,
                                 p->net.now), GQ_OK);
   CHECK_EQ (gq_conn_server_new (&p->srv.c, scfg, &p->scfg, &p->sev,
+                                p->net.now), GQ_OK);
+  return p;
+}
+
+static uint64_t
+sim_wall (void *u)
+{
+  return ((struct net *) u)->now / 1000000;
+}
+
+static int
+make_srv (struct net *n, const gq_conn_accept *acc)
+{
+  struct pair *p = (struct pair *) n;
+
+  return gq_conn_server_accept (&p->srv.c, &p->scfg_conn, &p->scfg, &p->sev,
+                                n->now, acc);
+}
+
+/* A pair whose server exists only once the admission step accepts.  */
+static struct pair *
+pair_new_admit (const gq_conn_config *ccfg, unsigned loss, uint32_t seed,
+                int require_retry, const uint8_t *token, size_t token_len)
+{
+  struct pair *p = calloc (1, sizeof *p);
+  gq_conn_config cc;
+
+  p->net.now = 1000000;
+  p->net.latency = 10000;
+  p->net.loss_pct = loss;
+  p->net.rng = seed;
+  p->net.drop_index = -1;
+  p->net.app[0] = &p->cli;
+  p->net.app[1] = &p->srv;
+  p->cli.net = p->srv.net = &p->net;
+  p->srv.idx = 1;
+  p->ccfg.server_name = "example.test";
+  p->ccfg.trust = fx_trust;
+  p->ccfg.alpn = alpn_list;
+  p->ccfg.n_alpn = 1;
+  p->scfg.credentials.chain = fx_ec.chain;
+  p->scfg.credentials.n_chain = 1;
+  p->scfg.credentials.key = fx_ec.key;
+  p->scfg.alpn = alpn_list;
+  p->scfg.n_alpn = 1;
+  fill_events (&p->cev, &p->cli);
+  fill_events (&p->sev, &p->srv);
+  CHECK_EQ (gq_token_keys_init (&p->keys), GQ_OK);
+  p->net.keys = &p->keys;
+  p->net.admit.require_retry = require_retry;
+  p->net.make_srv = make_srv;
+  memcpy (p->net.addr, "\x7f\0\0\1\x11\x5c", 6);
+  memset (&p->scfg_conn, 0, sizeof p->scfg_conn);
+  p->scfg_conn.wall_seconds = sim_wall;
+  p->scfg_conn.wall_user = &p->net;
+  cc = ccfg ? *ccfg : p->scfg_conn;
+  cc.token = token;
+  cc.token_len = token_len;
+  CHECK_EQ (gq_conn_client_new (&p->cli.c, &cc, &p->ccfg, &p->cev,
                                 p->net.now), GQ_OK);
   return p;
 }
@@ -624,6 +731,216 @@ test_congestion (size_t size, unsigned loss, uint64_t blackout_at,
     CHECK_EQ (p->net.min_cwnd, 2400);
   else
     CHECK (p->net.min_cwnd > 2400);
+  pair_free (p);
+}
+
+static int
+one_stream_done (struct net *n)
+{
+  return n->app[0]->sb[0].used && n->app[0]->sb[0].fin;
+}
+
+/* A request over a connection made through the admission step.  */
+static void
+exchange (struct pair *p)
+{
+  uint64_t id;
+  struct sbuf *s;
+
+  p->srv.respond = 5000;
+  CHECK (run (&p->net, both_connected, 30000000));
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 20;
+  s->out_fin = 1;
+  CHECK (run (&p->net, one_stream_done, 30000000));
+  CHECK_EQ (s->n, 5000);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+}
+
+static void
+test_retry (uint32_t version, unsigned loss, uint32_t seed)
+{
+  struct pair *p;
+  gq_conn_config cfg;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.version = version;
+  cfg.wall_seconds = sim_wall;
+  p = pair_new_admit (&cfg, loss, seed, 1, NULL, 0);
+  cfg.wall_seconds = sim_wall;
+  p->scfg_conn.version = version;
+  p->net.admit.retry_lifetime_s = 30;
+  exchange (p);
+  /* Exactly one Retry (with loss, retransmitted Initials may draw more),
+     and the server connection only exists after the token came back.  */
+  if (!loss)
+    /* The client's first flight is two datagrams, so two Retries go out; it
+     obeys the first and ignores the second.  */
+  CHECK (p->net.replies >= 1 && p->net.accepts == 1);
+  /* NEW_TOKEN arrived.  */
+  run (&p->net, NULL, 1000000);
+  CHECK_EQ (p->cli.tokens, 1);
+  pair_free (p);
+}
+
+static void
+test_tokens (void)
+{
+  struct pair *p, *q;
+  uint8_t token[512];
+  size_t tl;
+  gq_token_keys saved;
+  gq_conn_config cfg;
+
+  memset (&cfg, 0, sizeof cfg);
+  cfg.wall_seconds = sim_wall;
+  /* No Retry needed when not required: unvalidated at first, token issued.  */
+  p = pair_new_admit (&cfg, 0, 30, 0, NULL, 0);
+  exchange (p);
+  CHECK_EQ (p->net.replies, 0);
+  run (&p->net, NULL, 1000000);
+  CHECK_EQ (p->cli.tokens, 1);
+  memcpy (token, p->cli.token, p->cli.token_len);
+  tl = p->cli.token_len;
+  saved = p->keys;
+  pair_free (p);
+  /* With Retry required, a NEW_TOKEN from before skips the Retry.  */
+  q = pair_new_admit (&cfg, 0, 31, 1, token, tl);
+  q->keys = saved;
+  exchange (q);
+  CHECK_EQ (q->net.replies, 0);
+  pair_free (q);
+  /* From another address it is worthless: the client gets a Retry.  */
+  q = pair_new_admit (&cfg, 0, 32, 1, token, tl);
+  q->keys = saved;
+  q->net.addr[3] = 9;
+  exchange (q);
+  CHECK (q->net.replies >= 1);
+  pair_free (q);
+  /* Garbage as a token is treated as no token.  */
+  {
+    uint8_t junk[60];
+
+    memset (junk, 0x5a, sizeof junk);
+    q = pair_new_admit (&cfg, 0, 33, 1, junk, sizeof junk);
+  q->keys = saved;
+    exchange (q);
+    CHECK (q->net.replies >= 1);
+    pair_free (q);
+  }
+  /* An expired token (a day and more later) is refused too.  */
+  q = pair_new_admit (&cfg, 0, 34, 1, token, tl);
+  q->keys = saved;
+  q->net.now += (uint64_t) 90000 * 1000000;
+  exchange (q);
+  CHECK (q->net.replies >= 1);
+  pair_free (q);
+}
+
+/* Anything that is not a first Initial is dropped without an answer, and
+   unknown versions get Version Negotiation.  */
+static void
+test_admit_input (void)
+{
+  gq_token_keys keys;
+  gq_admit_config ac;
+  gq_conn_accept acc;
+  uint8_t dg[1300], out[1500], addr[4] = { 1, 2, 3, 4 };
+  size_t rl, hl;
+  int act;
+
+  memset (&ac, 0, sizeof ac);
+  gq_token_keys_init (&keys);
+  memset (dg, 0, sizeof dg);
+  /* A real-looking Initial: build a header with room for 1200 bytes.  */
+  {
+    uint8_t dcid[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, scid[4] = { 9, 9, 9, 9 };
+
+    CHECK_EQ (gq_long_header_build (GQ_PKT_INITIAL, GQ_VERSION_1, dcid, 8,
+                                    scid, 4, NULL, 0, 0, 1, 1100, dg,
+                                    sizeof dg, &hl), GQ_OK);
+  }
+  act = gq_quic_admit (&keys, &ac, addr, 4, dg, 1200, 5, out, sizeof out, &rl,
+                       &acc);
+  CHECK_EQ (act, GQ_ADMIT_ACCEPT);
+  CHECK (!acc.validated && acc.token_keys == &keys && acc.addr_len == 4);
+  ac.require_retry = 1;
+  act = gq_quic_admit (&keys, &ac, addr, 4, dg, 1200, 5, out, sizeof out, &rl,
+                       &acc);
+  CHECK_EQ (act, GQ_ADMIT_REPLY);
+  CHECK (rl > 30 && rl < 200 && (out[0] & 0x80));
+  /* Too short a datagram, a short-header packet, junk: dropped.  */
+  CHECK_EQ (gq_quic_admit (&keys, &ac, addr, 4, dg, 1199, 5, out, sizeof out,
+                           &rl, &acc), GQ_ADMIT_DROP);
+  dg[0] &= 0x7f;
+  CHECK_EQ (gq_quic_admit (&keys, &ac, addr, 4, dg, 1200, 5, out, sizeof out,
+                           &rl, &acc), GQ_ADMIT_DROP);
+  dg[0] |= 0x80;
+  /* An unknown version draws Version Negotiation listing 1 and 2, but a
+     Version Negotiation packet itself does not.  */
+  dg[1] = 0x1a; dg[2] = 0x2a; dg[3] = 0x3a; dg[4] = 0x4a;
+  act = gq_quic_admit (&keys, &ac, addr, 4, dg, 1200, 5, out, sizeof out, &rl,
+                       &acc);
+  CHECK_EQ (act, GQ_ADMIT_REPLY);
+  {
+    gq_long_header h;
+
+    CHECK_EQ (gq_long_header_parse (out, rl, &h), GQ_OK);
+    CHECK (h.type == GQ_PKT_VERSION_NEGOTIATION && gq_vn_count (&h) == 2);
+    CHECK (gq_vn_get (&h, 0) == GQ_VERSION_1 && gq_vn_get (&h, 1)
+           == GQ_VERSION_2);
+  }
+  dg[1] = dg[2] = dg[3] = dg[4] = 0;
+  CHECK_EQ (gq_quic_admit (&keys, &ac, addr, 4, dg, 1200, 5, out, sizeof out,
+                           &rl, &acc), GQ_ADMIT_DROP);
+  gq_token_keys_wipe (&keys);
+}
+
+/* A Retry with a bad integrity tag changes nothing; a good one restarts the
+   Initial flight with the token, and the server sees the original ID.  */
+static void
+test_retry_tamper (void)
+{
+  struct pair *p = pair_new_admit (NULL, 0, 50, 1, NULL, 0);
+  uint8_t d1[1500], d2[1500], retry[1500], bad[1500], again[1500];
+  size_t l1, l2, lr = 0, la;
+  gq_conn_accept acc;
+  const uint8_t *odcid;
+  size_t odlen;
+
+  odcid = gq_conn_initial_dcid (p->cli.c, &odlen);
+  CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, d1, sizeof d1, &l1), GQ_OK);
+  CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, d2, sizeof d2, &l2), GQ_OK);
+  CHECK (l1 == 1200 && l2 > 0);
+  CHECK_EQ (gq_quic_admit (&p->keys, &p->net.admit, p->net.addr, 6, d1, l1,
+                           1, retry, sizeof retry, &lr, &acc), GQ_ADMIT_REPLY);
+  memcpy (bad, retry, lr);
+  bad[lr - 1] ^= 1;
+  gq_conn_recv (p->cli.c, p->net.now, bad, lr);
+  CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, again, sizeof again, &la),
+            GQ_OK);
+  CHECK_EQ (la, 0);
+  {
+    uint8_t odsave[GQ_MAX_CID_LEN];
+
+    memcpy (odsave, odcid, odlen);
+    gq_conn_recv (p->cli.c, p->net.now, retry, lr);
+    CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, again, sizeof again, &la),
+              GQ_OK);
+    CHECK_EQ (la, 1200);
+    CHECK_EQ (gq_quic_admit (&p->keys, &p->net.admit, p->net.addr, 6, again,
+                             la, 1, retry, sizeof retry, &lr, &acc),
+              GQ_ADMIT_ACCEPT);
+    CHECK (acc.validated && acc.odcid.len == odlen
+           && !memcmp (acc.odcid.data, odsave, odlen));
+    /* The same token from another address is not accepted.  */
+    p->net.addr[0] ^= 1;
+    CHECK_EQ (gq_quic_admit (&p->keys, &p->net.admit, p->net.addr, 6, again,
+                             la, 1, retry, sizeof retry, &lr, &acc),
+              GQ_ADMIT_REPLY);
+  }
   pair_free (p);
 }
 
@@ -820,6 +1137,12 @@ main (void)
   test_congestion (2000000, 0, 0, 0, 0, 0);
   test_congestion (2000000, 3, 0, 0, 1, 0);
   test_congestion (4000000, 0, 1000000, 3000000, 1, 1);
+  test_retry (0, 0, 40);
+  test_retry (GQ_VERSION_2, 0, 41);
+  test_retry (0, 20, 42);
+  test_tokens ();
+  test_retry_tamper ();
+  test_admit_input ();
   test_close ();
   test_idle ();
   test_streams_misc ();

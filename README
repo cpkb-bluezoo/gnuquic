@@ -69,6 +69,10 @@ Pre-alpha.  What exists today:
            gaps, acknowledged and lost data)
   stream   stream send and receive state machines (RFC 9000 section 3):
            in-order push delivery, flow control, final size, reset
+  token    address validation tokens: authenticated, address-bound, keyed
+           by a rotating key (Retry and NEW_TOKEN)
+  listen   stateless admission of a first Initial: Version Negotiation,
+           Retry, token validation
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle

@@ -462,6 +462,47 @@ stateless_reset_check (gq_conn *c, const uint8_t *data, size_t len)
   return 0;
 }
 
+/* Client: a Retry packet (RFC 9000 section 17.2.5).  Restart the Initial
+   flight with the server's token and connection ID.  */
+static int
+recv_retry (gq_conn *c, const gq_long_header *h, const uint8_t *pkt, size_t len)
+{
+  space *s = &c->sp[SP_INITIAL];
+  gq_packet_keys ck, sk;
+  size_t i;
+
+  if (c->role != GQ_ROLE_CLIENT || c->got_peer_packet || c->retried
+      || h->version != c->version || h->token.len == 0
+      || h->token.len > sizeof c->token || h->scid.len == 0
+      || !is_our_cid (c, h->dcid.data, h->dcid.len)
+      || s->discarded)
+    return 0;
+  if (gq_retry_verify (h, pkt, len, c->initial_dcid.data,
+                       c->initial_dcid.len) != GQ_OK)
+    return 0;
+  if (gq_packet_keys_initial (c->version, h->scid.data, h->scid.len, &ck, &sk)
+      != GQ_OK)
+    return 0;
+  c->retried = 1;
+  memcpy (c->token, h->token.data, h->token.len);
+  c->token_len = h->token.len;
+  c->dcid.len = c->retry_scid.len = c->initial_dcid.len = (uint8_t) h->scid.len;
+  memcpy (c->dcid.data, h->scid.data, h->scid.len);
+  c->retry_scid = c->dcid;
+  c->initial_dcid = c->dcid;
+  c->p[0].cid = c->dcid;
+  s->wk = ck;
+  s->rk = sk;
+  /* Everything sent so far goes out again under the new keys.  */
+  for (i = 0; i < s->n_sent; i++)
+    requeue_frames (c, SP_INITIAL, &s->sent[i]);
+  sp_sent_clear (c, SP_INITIAL);
+  s->probes = 0;
+  s->loss_time = 0;
+  c->pto_count = 0;
+  return 1;
+}
+
 /* Handle one long-header packet.  *USED is the number of bytes it took
    (0: stop, the rest of the datagram is unusable).  Returns 1 if a packet
    was processed.  */
@@ -482,8 +523,10 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
   *used = h.packet_len;
   if (h.version != c->version)
     return 0;
+  if (h.type == GQ_PKT_RETRY)
+    return recv_retry (c, &h, pkt, h.packet_len);
   if (h.type != GQ_PKT_INITIAL && h.type != GQ_PKT_HANDSHAKE)
-    return 0;			/* Retry, 0-RTT, Version Negotiation.  */
+    return 0;			/* 0-RTT, Version Negotiation.  */
   sp = h.type == GQ_PKT_INITIAL ? SP_INITIAL : SP_HANDSHAKE;
   if (c->role == GQ_ROLE_SERVER && sp == SP_INITIAL && !c->got_first_initial)
     {
@@ -503,8 +546,8 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     return 0;
   if (!is_our_cid (c, h.dcid.data, h.dcid.len)
       && !(c->role == GQ_ROLE_SERVER && sp == SP_INITIAL
-           && h.dcid.len == c->odcid.len
-           && memcmp (h.dcid.data, c->odcid.data, h.dcid.len) == 0))
+           && h.dcid.len == c->initial_dcid.len
+           && memcmp (h.dcid.data, c->initial_dcid.data, h.dcid.len) == 0))
     return 0;
   if (c->dcid_set && (c->role == GQ_ROLE_SERVER || c->got_peer_packet)
       && (h.scid.len != c->dcid.len
