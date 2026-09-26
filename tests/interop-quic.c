@@ -91,6 +91,9 @@ struct app
   int retry;
   gq_token_keys keys;
   int dgram, dgram_left, dgram_recv;	/* DATAGRAM: enabled, to send.  */
+  int early;				/* 0-RTT: server accepts, client uses.  */
+  const char *session_file;		/* Client: where the session is kept.  */
+  int saved_session;
   struct app *next;			/* Server: connections in a list.  */
 };
 
@@ -221,7 +224,9 @@ ev_connected (void *u, const gq_tls_info *info)
   struct app *a = u;
 
   a->connected = 1;
-  printf ("CONNECTED alpn=%.*s\n", (int) info->alpn_len, info->alpn);
+  printf ("CONNECTED alpn=%.*s%s%s\n", (int) info->alpn_len, info->alpn,
+          info->resumed ? " resumed" : "",
+          info->early_data_accepted ? " early" : "");
   fflush (stdout);
 }
 
@@ -233,6 +238,11 @@ ev_data (void *u, uint64_t id, const uint8_t *d, size_t n, int fin)
 
   if (a->server)
     {
+      if (a->c && gq_conn_early_data_active (a->c))
+        {
+          printf ("EARLY_DATA stream=%llu bytes=%zu\n", (unsigned long long) id, n);
+          fflush (stdout);
+        }
       if (x->req_len + n < sizeof x->req)
         {
           memcpy (x->req + x->req_len, d, n);
@@ -321,9 +331,42 @@ ev_migrated (void *u, const gq_path *p)
 static void
 ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
 {
+  struct app *a = u;
+  gq_tls_session sess;
+  uint8_t blob[4096], params[512];
+  size_t bl = 0, pl = 0;
+  uint32_t v32[3];
+  FILE *f;
+
+  /* Keep the first ticket, with what 0-RTT needs alongside it: the server's
+     transport parameters and the QUIC version.  */
+  if (a->server || a->session_file == NULL || a->saved_session)
+    return;
+  if (gq_tls_session_store (&sess, t) != GQ_OK
+      || gq_tls_session_serialize (&sess, blob, sizeof blob, &bl) != GQ_OK
+      || gq_conn_get_peer_params (a->c, params, sizeof params, &pl) != GQ_OK)
+    return;
+  f = fopen (a->session_file, "wb");
+  if (f == NULL)
+    return;
+  v32[0] = version;
+  v32[1] = (uint32_t) bl;
+  v32[2] = (uint32_t) pl;
+  fwrite (v32, sizeof v32, 1, f);
+  fwrite (blob, 1, bl, f);
+  fwrite (params, 1, pl, f);
+  fclose (f);
+  a->saved_session = 1;
+  printf ("SESSION saved\n");
+  fflush (stdout);
+}
+
+static void
+ev_early_result (void *u, int accepted)
+{
   (void) u;
-  (void) t;
-  (void) version;
+  printf ("EARLY accepted=%d\n", accepted);
+  fflush (stdout);
 }
 
 /* ---- I/O ---- */
@@ -482,6 +525,7 @@ try_migrate (struct app *a)
 
 struct cfgs
 {
+  gq_tls_session sess;
   gq_tls_config cc;
   gq_tls_server_config sc;
   gq_slice alpn[1];
@@ -658,6 +702,8 @@ serve (struct app *tmpl, struct cfgs *g, int timeout_s, int max_conns)
   ec.conn = tmpl->cfg;
   ec.server = &g->sc;
   ec.admit.require_retry = tmpl->retry;
+  ec.tickets = tmpl->early;
+  ec.early_data = tmpl->early;
   memset (&ee, 0, sizeof ee);
   ee.user = &sv;
   ee.accept = srv_accept;
@@ -759,6 +805,8 @@ main (int argc, char **argv)
       else if (!strcmp (o, "--v2")) a.v2 = 1;
       else if (!strcmp (o, "--retry")) a.retry = 1;
       else if (!strcmp (o, "--migrate")) a.migrate = 1;
+      else if (!strcmp (o, "--early")) a.early = 1;
+      else if (!strcmp (o, "--session-file") && v) a.session_file = v, i++;
       else if (!strcmp (o, "--dgram") && v)
         {
           a.dgram = 1;
@@ -793,6 +841,7 @@ main (int argc, char **argv)
   a.ev.stream_writable = ev_writable;
   a.ev.closed = ev_closed;
   a.ev.ticket = ev_ticket;
+  a.ev.early_data_result = ev_early_result;
   a.ev.datagram = ev_datagram;
   a.ev.path_validated = ev_path_validated;
   a.ev.path_failed = ev_path_failed;
@@ -870,6 +919,32 @@ main (int argc, char **argv)
       g.cc.trust = g.trust;
       g.cc.alpn = g.alpn;
       g.cc.n_alpn = 1;
+      /* A saved session from an earlier run, offered with early data.  */
+      if (a.early && a.session_file)
+        {
+          FILE *sf = fopen (a.session_file, "rb");
+          uint32_t v32[3];
+          static uint8_t blob[4096], params[512];
+
+          if (sf && fread (v32, sizeof v32, 1, sf) == 1 && v32[1] <= sizeof blob
+              && v32[2] <= sizeof params
+              && fread (blob, 1, v32[1], sf) == v32[1]
+              && fread (params, 1, v32[2], sf) == v32[2]
+              && gq_tls_session_deserialize (&g.sess, blob, v32[1]) == GQ_OK)
+            {
+              g.cc.resume = &g.sess;
+              g.cc.early_data = 1;
+              a.cfg.resume_params = params;
+              a.cfg.resume_params_len = v32[2];
+              /* The session's version, and only that.  */
+              a.cfg.version = a.cfg.versions[0] = v32[0];
+              a.cfg.n_versions = 1;
+              printf ("RESUMING\n");
+              fflush (stdout);
+            }
+          if (sf)
+            fclose (sf);
+        }
       memset (&hints, 0, sizeof hints);
       hints.ai_family = AF_INET;
       hints.ai_socktype = SOCK_DGRAM;
@@ -900,7 +975,7 @@ main (int argc, char **argv)
 
             pump (&a);
             flush_out (&a);
-            if (a.connected && gq_conn_stream_open (a.c, 1, &id) == GQ_OK)
+            if (gq_conn_stream_open (a.c, 1, &id) == GQ_OK)
               {
                 struct xfer *x = xfer_get (&a, id, 1);
                 char op[1024];

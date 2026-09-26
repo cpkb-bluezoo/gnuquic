@@ -59,6 +59,10 @@ struct capp
   int stream_used[4];
   int connected, closed, done, mig;
   gq_conn_close_info ci;
+  gq_tls_session sess;
+  int have_sess, early_bytes, early_result;
+  uint8_t params[512];
+  size_t params_len;
 };
 
 struct node
@@ -134,6 +138,8 @@ ev_data (void *u, uint64_t id, const uint8_t *d, size_t n, int fin)
   for (k = 0; k < n; k++)
     CHECK (d[k] == pat (id, a->got[x] + k));
   a->got[x] += n;
+  if (a->c && gq_conn_early_data_active (a->c))
+    a->early_bytes += (int) n;
   if (fin)
     {
       a->fin[x] = 1;
@@ -164,6 +170,26 @@ ev_migrated (void *u, const gq_path *p)
 }
 
 static void
+ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
+{
+  struct capp *a = u;
+
+  (void) version;
+  if (a->have_sess)
+    return;
+  CHECK_EQ (gq_tls_session_store (&a->sess, t), GQ_OK);
+  CHECK_EQ (gq_conn_get_peer_params (a->c, a->params, sizeof a->params,
+                                     &a->params_len), GQ_OK);
+  a->have_sess = 1;
+}
+
+static void
+ev_early_result (void *u, int accepted)
+{
+  ((struct capp *) u)->early_result = accepted ? 1 : -1;
+}
+
+static void
 fill_events (gq_conn_events *e, struct capp *a)
 {
   memset (e, 0, sizeof *e);
@@ -172,6 +198,8 @@ fill_events (gq_conn_events *e, struct capp *a)
   e->stream_data = ev_data;
   e->closed = ev_closed;
   e->migrated = ev_migrated;
+  e->ticket = ev_ticket;
+  e->early_data_result = ev_early_result;
 }
 
 /* ---- Endpoint events ---- */
@@ -572,6 +600,68 @@ all_clients_done (struct net *net)
 
 /* ---- Tests ---- */
 
+/* Tickets and 0-RTT through endpoints: the second connection's request
+   arrives in the first flight and the server endpoint sees it as early
+   data.  */
+static void
+test_early_data (void)
+{
+  gq_endpoint_config sc;
+  gq_conn_config cc;
+  struct net *net;
+  struct capp *a, *b;
+  gq_path path;
+  gq_conn_events ev;
+  gq_tls_config tls2;
+  int i;
+
+  memset (&sc, 0, sizeof sc);
+  sc.tickets = 1;
+  sc.early_data = 1;
+  memset (&cc, 0, sizeof cc);
+  cc.version = GQ_VERSION_1;
+  sc.conn.version = GQ_VERSION_1;
+  net = net_new (&sc, 12, NULL);
+  a = client_conn (net, 1, &cc);
+  CHECK (run (net, all_clients_done, 60000000));
+  run (net, NULL, 1000000);
+  CHECK (a->have_sess);
+  /* A second connection resumes and speaks at once.  */
+  tls2 = ccfg;
+  tls2.resume = &a->sess;
+  tls2.early_data = 1;
+  cc.resume_params = a->params;
+  cc.resume_params_len = a->params_len;
+  b = new_app (&net->node[1], 0);
+  fill_events (&ev, b);
+  memset (&path, 0, sizeof path);
+  path.local = net->node[1].addr;
+  path.remote = net->node[0].addr;
+  CHECK_EQ (gq_endpoint_connect (net->node[1].ep, net->now, &tls2, &cc, &path,
+                                 &ev, &b->c), GQ_OK);
+  {
+    uint64_t id;
+
+    for (i = 0; i < 2; i++)
+      {
+        CHECK_EQ (gq_conn_stream_open (b->c, 1, &id), GQ_OK);
+        b->stream_used[i] = 1;
+        b->out_total[i] = 20;
+      }
+  }
+  CHECK (run (net, all_clients_done, 60000000));
+  CHECK_EQ (b->early_result, 1);
+  {
+    int k, early = 0;
+
+    for (k = 0; k < net->node[0].napp; k++)
+      early += net->node[0].app[k].early_bytes;
+    CHECK_EQ (early, 40);		/* Two requests of 20 bytes.  */
+  }
+  CHECK (b->got[0] == net->node[0].respond && b->got[1] == net->node[0].respond);
+  net_free (net);
+}
+
 static void
 test_many_connections (void)
 {
@@ -861,6 +951,7 @@ main (void)
   fx_setup ();
   setup_tls ();
   test_many_connections ();
+  test_early_data ();
   test_retry ();
   test_version_negotiation ();
   test_stateless_reset ();

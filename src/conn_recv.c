@@ -44,8 +44,29 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
   int sp = SPACE_OF_LEVEL (s->level);
   gq_packet_keys k;
 
+  if (s->level == GQ_LEVEL_EARLY)
+    {
+      /* 0-RTT keys: the client writes with them, the server reads.  */
+      if (gq_packet_keys_derive (c->version, s->aead, s->secret, s->len, &k)
+          != GQ_OK)
+        {
+          conn_fail (c, GQ_QERR_INTERNAL, "key derivation failed");
+          return;
+        }
+      if (s->dir == GQ_DIR_WRITE && c->role == GQ_ROLE_CLIENT)
+        {
+          c->early_wk = k;
+          c->have_early_wk = 1;
+        }
+      else if (s->dir == GQ_DIR_READ && c->role == GQ_ROLE_SERVER)
+        {
+          c->early_rk = k;
+          c->have_early_rk = 1;
+        }
+      return;
+    }
   if (sp < 0)
-    return;			/* 0-RTT is not supported.  */
+    return;
   if (gq_packet_keys_derive (c->version, s->aead, s->secret, s->len, &k)
       != GQ_OK)
     {
@@ -69,6 +90,8 @@ conn_install_keys (gq_conn *c, const gq_tls_secret *s)
       c->sp[sp].have_wk = 1;
       if (sp == SP_APP)
         {
+          c->have_early_wk = 0;
+          gq_packet_keys_wipe (&c->early_wk);
           memcpy (c->wsec, s->secret, s->len);
           c->wsec_len = s->len;
         }
@@ -286,6 +309,15 @@ on_frame (void *user, const gq_frame *f)
       && f->type != GQ_FRAME_CONNECTION_CLOSE)
     {
       conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "frame not allowed here");
+      return 1;
+    }
+  if (c->rx_early
+      && (f->type == GQ_FRAME_ACK || f->type == GQ_FRAME_CRYPTO
+          || f->type == GQ_FRAME_NEW_TOKEN
+          || f->type == GQ_FRAME_PATH_RESPONSE
+          || f->type == GQ_FRAME_HANDSHAKE_DONE))
+    {
+      conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "frame not allowed in 0-RTT");
       return 1;
     }
   switch (f->type)
@@ -561,6 +593,54 @@ recv_vn (gq_conn *c, const gq_long_header *h)
   return 1;
 }
 
+/* Server: a 0-RTT packet (RFC 9001 section 4.6).  It is a packet of the
+   application data space, protected with the early keys the handshake
+   engine derived from the resumption ticket.  */
+static int
+recv_early (gq_conn *c, uint64_t now, uint8_t *pkt, const gq_long_header *h)
+{
+  space *s = &c->sp[SP_APP];
+  uint64_t pn;
+  size_t poff, plen;
+  int r, ae, nonprobing = 0;
+
+  if (c->role != GQ_ROLE_SERVER || !c->have_early_rk || c->switched
+      || h->version != c->version || s->discarded)
+    return 0;
+  if (c->handshake_complete && now > c->early_rk_deadline)
+    {
+      /* The window for stragglers has passed.  */
+      c->have_early_rk = 0;
+      gq_packet_keys_wipe (&c->early_rk);
+      return 0;
+    }
+  /* Until the client hears from us it addresses us by the ID it invented.  */
+  if (!(is_our_cid (c, h->dcid.data, h->dcid.len)
+        || (h->dcid.len == c->initial_dcid.len
+            && memcmp (h->dcid.data, c->initial_dcid.data, h->dcid.len) == 0))
+      || h->scid.len != c->dcid.len
+      || memcmp (h->scid.data, c->dcid.data, h->scid.len))
+    return 0;
+  r = gq_packet_open (&c->early_rk, s->have_recv, s->largest_recv, pkt,
+                      h->packet_len, h->pn_offset, &pn, &poff, &plen);
+  if (r == GQ_ERR_ENCODING)
+    {
+      conn_fail (c, GQ_QERR_PROTOCOL_VIOLATION, "reserved bits set");
+      return 1;
+    }
+  if (r != GQ_OK)
+    return 0;
+  if (pn < s->recv_floor || gq_ranges_contains (&s->recv, pn))
+    return 1;
+  c->rx_early = 1;
+  r = process_payload (c, SP_APP, pkt + poff, plen, &ae, &nonprobing);
+  c->rx_early = 0;
+  if (r != 0)
+    return 1;
+  note_received (c, SP_APP, pn, ae, now);
+  return 1;
+}
+
 /* Handle one long-header packet.  *USED is the number of bytes it took
    (0: stop, the rest of the datagram is unusable).  Returns 1 if a packet
    was processed.  */
@@ -618,6 +698,8 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
     }
   if (h.type == GQ_PKT_RETRY)
     return recv_retry (c, &h, pkt, h.packet_len);
+  if (h.type == GQ_PKT_ZERO_RTT)
+    return c->got_first_initial ? recv_early (c, now, pkt, &h) : 0;
   if (h.type != GQ_PKT_INITIAL && h.type != GQ_PKT_HANDSHAKE)
     return 0;			/* 0-RTT.  */
   sp = h.type == GQ_PKT_INITIAL ? SP_INITIAL : SP_HANDSHAKE;

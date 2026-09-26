@@ -48,6 +48,7 @@
 
 #include <gnuquic/conn.h>
 #include <gnuquic/listen.h>
+#include <gnuquic/replay.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,6 +84,14 @@ typedef struct gq_endpoint_config
   /* Ask for a Retry once this many connections exist (0: only if
      admit.require_retry).  */
   size_t retry_above;
+  /* Session tickets and 0-RTT for the server.  TICKETS makes the endpoint
+     keep a ticket key ring (unless the TLS configuration has one) so
+     clients can resume; EARLY_DATA also accepts early data from them, once
+     per ticket (RFC 8446 section 8.1: the endpoint keeps a replay cache of
+     REPLAY_CAPACITY tickets, 0: 65536, which is fine for one process; a
+     cluster must share its own through the TLS configuration).  */
+  int tickets, early_data;
+  size_t replay_capacity;
   unsigned max_resets_per_second;	/* 0: 100.  */
   int no_stateless_reset;
   /* Key the stateless reset tokens derive from.  If not given a random one

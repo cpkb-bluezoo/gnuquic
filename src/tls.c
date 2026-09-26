@@ -121,6 +121,28 @@ gqi_emit_secret (gq_tls *t, enum gq_level level, enum gq_dir dir,
   return r ? gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER) : GQ_OK;
 }
 
+/* As gqi_emit_secret, for a secret of a suite other than the one negotiated
+   (yet): the early traffic secret comes from the resumed session's suite.  */
+int
+gqi_emit_secret_as (gq_tls *t, enum gq_level level, enum gq_dir dir,
+                    enum gq_aead aead, enum gq_hash hash,
+                    const uint8_t *secret)
+{
+  gq_tls_secret s;
+  int r;
+
+  memset (&s, 0, sizeof s);
+  s.level = level;
+  s.dir = dir;
+  s.aead = aead;
+  s.hash = hash;
+  s.len = gq_hash_size (hash);
+  memcpy (s.secret, secret, s.len);
+  r = t->sink.secret (t->sink.user, &s);
+  gq_wipe (&s, sizeof s);
+  return r ? gqi_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER) : GQ_OK;
+}
+
 /* Feed a message to the transcript(s) in use.  */
 int
 gqi_tr_update (gq_tls *t, gq_slice msg)

@@ -100,6 +100,10 @@ size_t gq_sstream_room (const gq_sstream *s);
    is dropped.  */
 void gq_sstream_reset (gq_sstream *s, uint64_t err);
 
+/* Forget that anything was sent: every unacknowledged byte (and the FIN) is
+   sent again as new data.  Used when 0-RTT data was rejected.  */
+void gq_sstream_rewind (gq_sstream *s);
+
 /* Peer raised its credit (ignored if lower than the current value).  */
 void gq_sstream_set_max (gq_sstream *s, uint64_t max);
 

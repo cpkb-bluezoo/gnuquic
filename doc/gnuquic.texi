@@ -636,6 +636,41 @@ After a HelloRetryRequest or a rejection the client discards its early
 keys, reports the rejection through the sink so the application can
 resend the data as ordinary application data, and continues.
 
+@subheading In QUIC
+
+The QUIC transport carries early data in 0-RTT packets, which belong to
+the application data packet number space.
+
+@subsubheading Client
+The connection is given the session (@code{gq_tls_config.resume} with
+@code{early_data} set) and the server's transport parameters from the
+connection that issued it (@code{resume_params}, which the application
+keeps alongside the ticket; @code{gq_conn_get_peer_params} produces them).
+Until the server's own parameters arrive the remembered ones stand in:
+streams can be opened and written and datagrams sent at once, and 0-RTT
+packets ride behind the Initial in the first datagrams.  The session must
+come from a connection of the version this one starts in, which the
+application pins (tickets are version bound, @ref{Version negotiation}).
+The @code{early_data_result} event reports the verdict.  If the server
+accepts, its parameters must not be lower than the remembered ones or the
+connection ends with a protocol violation.  If it rejects, whatever was
+sent early is treated as never sent: stream data goes out again from the
+start in 1-RTT packets under the real limits, datagrams are reported lost,
+and the 0-RTT keys are discarded.
+
+@subsubheading Server
+The server engine derives the early read keys from the ticket; 0-RTT
+packets that arrive after the ClientHello are decrypted with them and
+processed in the application space, with ACK, CRYPTO, NEW_TOKEN,
+PATH_RESPONSE and HANDSHAKE_DONE forbidden.  Early packets that arrive
+before the ClientHello are dropped and sent again by the client.  The
+early keys are discarded three probe timeouts after the handshake
+completes.  While the callbacks for early data run,
+@code{gq_conn_early_data_active} is true: the data can be replayed, so do
+only what is safe to do twice.  A server that switched the connection to
+another version ignores 0-RTT.  The endpoint's @code{tickets} and
+@code{early_data} options provide the ticket keys and a replay cache.
+
 @node QUIC connections
 @chapter QUIC connections
 
@@ -697,7 +732,7 @@ event delivers received ones, and @code{datagram_acked} and
 @code{datagram_lost} report the fate of each sent one by id.
 
 @heading Limits of this step
-Pacing and ECN and 0-RTT are not implemented yet.  The receiving side treats a few limits as
+Pacing and ECN are not implemented yet.  The receiving side treats a few limits as
 fixed: 64 tracked packet number ranges per space and 8 connection IDs
 in each direction.
 
@@ -1001,7 +1036,7 @@ migration}).
 @strong{Done.}  DATAGRAM (RFC 9221) and the endpoint layer (@ref{Endpoint}).
 
 @item
-0-RTT wiring.
+@strong{Done.}  0-RTT in the QUIC transport (@ref{Early data}).
 @end enumerate
 
 @item

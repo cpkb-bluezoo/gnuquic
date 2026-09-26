@@ -202,5 +202,51 @@ if want ours-client-datagram; then
   report $rc "$name"
 fi
 
+# 0-RTT: a first connection leaves a session; the second speaks in its first
+# flight.  quiche's greased first version would send its early data in the
+# wrong version (and not again after Version Negotiation), so it starts in v1.
+if want ours-server-early; then
+  name=ours-server-early
+  port=$((port + 1))
+  "$OURS" server $port --cert ec.pem --key ec.key --root root --timeout 20 \
+    --connections 2 --early > "srv-$name.log" 2>&1 &
+  pid=$!
+  PIDS="$PIDS $pid"
+  sleep 0.5
+  rc=0
+  for k in 1 2; do
+    mkdir "out-$name-$k"
+    "$QDIR/quiche-client" --wire-version 1 --http-version HTTP/0.9 \
+      --no-verify --idle-timeout 4000 --early-data \
+      --session-file "sess-$name" --dump-responses "out-$name-$k" \
+      https://127.0.0.1:$port/small > "cli-$name-$k.log" 2>&1
+    check_files "out-$name-$k" small || rc=1
+  done
+  wait $pid 2>/dev/null
+  grep -q '^EARLY_DATA' "srv-$name.log" || rc=1
+  report $rc "$name"
+fi
+if want ours-client-early; then
+  name=ours-client-early
+  port=$((port + 1))
+  "$QDIR/quiche-server" --listen 127.0.0.1:$port --cert ec.pem --key ec.key \
+    --root root --http-version HTTP/0.9 --no-retry --early-data \
+    --idle-timeout 20000 > "qsrv-$name.log" 2>&1 &
+  pid=$!
+  PIDS="$PIDS $pid"
+  sleep 0.5
+  rc=0
+  for k in 1 2; do
+    mkdir "out-$name-$k"
+    "$OURS" client 127.0.0.1 $port --ca ca.pem --out "out-$name-$k" \
+      --timeout 10 --early --session-file "sess-$name" /small /hello \
+      > "cli-$name-$k.log" 2>&1 || rc=1
+    check_files "out-$name-$k" small hello || rc=1
+  done
+  kill $pid 2>/dev/null
+  grep -q 'EARLY accepted=1' "cli-$name-2.log" || rc=1
+  report $rc "$name"
+fi
+
 echo "$runs scenarios, $fails failed"
 [ $fails = 0 ]
