@@ -70,6 +70,9 @@ struct xfer
 struct app
 {
   int fd, server;
+  int fds[2], nfds;		/* Sockets; fds[0] is fd.  */
+  gq_addr laddr[2];		/* Their local addresses, as paths.  */
+  int migrate, mig_done;
   const char *root, *outdir;
   struct sockaddr_storage peer;
   socklen_t plen;
@@ -271,6 +274,33 @@ ev_closed (void *u, const gq_conn_close_info *i)
 }
 
 static void
+ev_path_validated (void *u, const gq_path *p)
+{
+  (void) u;
+  (void) p;
+  printf ("PATH_VALIDATED\n");
+  fflush (stdout);
+}
+
+static void
+ev_path_failed (void *u, const gq_path *p)
+{
+  (void) u;
+  (void) p;
+  printf ("PATH_FAILED\n");
+  fflush (stdout);
+}
+
+static void
+ev_migrated (void *u, const gq_path *p)
+{
+  (void) u;
+  (void) p;
+  printf ("MIGRATED\n");
+  fflush (stdout);
+}
+
+static void
 ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
 {
   (void) u;
@@ -287,6 +317,89 @@ lose (struct app *a)
   return a->loss > 0 && (int) ((a->rng >> 12) % 100) < a->loss;
 }
 
+/* IPv4 socket addresses as opaque path addresses: address, then port.  */
+static void
+to_addr (const struct sockaddr_storage *ss, gq_addr *a)
+{
+  const struct sockaddr_in *sin = (const struct sockaddr_in *) ss;
+
+  memset (a, 0, sizeof *a);
+  a->len = 6;
+  memcpy (a->data, &sin->sin_addr, 4);
+  memcpy (a->data + 4, &sin->sin_port, 2);
+}
+
+static void
+from_addr (const gq_addr *a, struct sockaddr_storage *ss, socklen_t *len)
+{
+  struct sockaddr_in *sin = (struct sockaddr_in *) ss;
+
+  memset (ss, 0, sizeof *ss);
+  sin->sin_family = AF_INET;
+  memcpy (&sin->sin_addr, a->data, 4);
+  memcpy (&sin->sin_port, a->data + 4, 2);
+  *len = sizeof *sin;
+}
+
+static int
+open_socket (struct app *a, int bind_port)
+{
+  struct sockaddr_in sin;
+  socklen_t sl = sizeof sin;
+  int fd = socket (AF_INET, SOCK_DGRAM, 0);
+
+  if (fd < 0)
+    return -1;
+  if (!a->server)
+    {
+      memset (&sin, 0, sizeof sin);
+      sin.sin_family = AF_INET;
+      sin.sin_addr.s_addr = htonl (INADDR_ANY);
+      sin.sin_port = htons ((uint16_t) bind_port);
+      if (bind (fd, (struct sockaddr *) &sin, sizeof sin) != 0)
+        return -1;
+    }
+  a->fds[a->nfds] = fd;
+  memset (&sin, 0, sizeof sin);
+  if (getsockname (fd, (struct sockaddr *) &sin, &sl) == 0)
+    to_addr ((struct sockaddr_storage *) &sin, &a->laddr[a->nfds]);
+  a->nfds++;
+  return fd;
+}
+
+/* Wait up to MS for a datagram on any socket.  Returns its size (0: none)
+   and the path it arrived on.  */
+static ssize_t
+wait_datagram (struct app *a, int ms, uint8_t *buf, size_t cap,
+               struct sockaddr_storage *from, socklen_t *fl, gq_path *path)
+{
+  struct pollfd pfd[2];
+  int i;
+
+  for (i = 0; i < a->nfds; i++)
+    {
+      pfd[i].fd = a->fds[i];
+      pfd[i].events = POLLIN;
+      pfd[i].revents = 0;
+    }
+  if (poll (pfd, (nfds_t) a->nfds, ms) <= 0)
+    return 0;
+  for (i = 0; i < a->nfds; i++)
+    if (pfd[i].revents & POLLIN)
+      {
+        ssize_t n;
+
+        *fl = sizeof *from;
+        n = recvfrom (a->fds[i], buf, cap, 0, (struct sockaddr *) from, fl);
+        if (n <= 0)
+          return 0;
+        path->local = a->laddr[i];
+        to_addr (from, &path->remote);
+        return n;
+      }
+  return 0;
+}
+
 static void
 flush_out (struct app *a)
 {
@@ -296,14 +409,56 @@ flush_out (struct app *a)
 
   if (a->c == NULL || !a->have_peer)
     return;
-  while (guard++ < 1000 && gq_conn_send (a->c, now_us (), buf, sizeof buf, &len)
-         == GQ_OK && len)
+  while (guard++ < 1000)
     {
+      gq_path to;
+      struct sockaddr_storage dest;
+      socklen_t dl;
+      int i, fd = a->fds[0];
+
+      memset (&to, 0, sizeof to);
+      if (gq_conn_send_path (a->c, now_us (), buf, sizeof buf, &len, &to)
+          != GQ_OK || len == 0)
+        break;
       if (lose (a))
         continue;
-      if (sendto (a->fd, buf, len, 0, (struct sockaddr *) &a->peer, a->plen)
-          < 0 && errno != EAGAIN && errno != ENOBUFS)
+      for (i = 0; i < a->nfds; i++)
+        if (to.local.len == a->laddr[i].len
+            && !memcmp (to.local.data, a->laddr[i].data, to.local.len))
+          fd = a->fds[i];
+      if (to.remote.len == 6)
+        from_addr (&to.remote, &dest, &dl);
+      else
+        {
+          dest = a->peer;
+          dl = a->plen;
+        }
+      if (sendto (fd, buf, len, 0, (struct sockaddr *) &dest, dl) < 0
+          && errno != EAGAIN && errno != ENOBUFS)
         break;
+    }
+}
+
+/* Client: once the handshake is confirmed, move to a new socket (a new
+   source port).  Retried each round until it is accepted.  */
+static void
+try_migrate (struct app *a)
+{
+  gq_path np;
+
+  if (!a->migrate || a->mig_done || a->server || !a->connected
+      || a->nfds != 1)
+    return;
+  if (open_socket (a, 0) < 0)
+    return;
+  np.local = a->laddr[1];
+  to_addr (&a->peer, &np.remote);
+  if (gq_conn_migrate (a->c, now_us (), &np) == GQ_OK)
+    a->mig_done = 1;
+  else
+    {
+      close (a->fds[1]);
+      a->nfds = 1;
     }
 }
 
@@ -338,10 +493,10 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
     {
       uint64_t t = 0, now = now_us ();
       int wait_ms = 100;
-      struct pollfd pfd;
 
       if (a->c)
         {
+          try_migrate (a);
           pump (a);
           flush_out (a);
           t = gq_conn_timeout (a->c);
@@ -363,16 +518,25 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
       if (now - start > (uint64_t) timeout_s * 1000000)
         {
           fprintf (stderr, "timeout\n");
+          if (a->c && getenv ("GQ_STATS"))
+            {
+              gq_conn_stats st;
+
+              gq_conn_get_stats (a->c, &st);
+              fprintf (stderr, "sent=%llu recv=%llu lost=%llu cwnd=%llu inflight=%llu pto=%u srtt=%llu\n",
+                       (unsigned long long) st.packets_sent, (unsigned long long) st.packets_received,
+                       (unsigned long long) st.packets_lost, (unsigned long long) st.cwnd,
+                       (unsigned long long) st.bytes_in_flight, st.pto_count,
+                       (unsigned long long) st.srtt_us);
+            }
           return 2;
         }
-      pfd.fd = a->fd;
-      pfd.events = POLLIN;
-      if (poll (&pfd, 1, wait_ms) > 0 && (pfd.revents & POLLIN))
-        {
-          struct sockaddr_storage from;
-          socklen_t fl = sizeof from;
-          ssize_t n = recvfrom (a->fd, buf, sizeof buf, 0,
-                                (struct sockaddr *) &from, &fl);
+      {
+        struct sockaddr_storage from;
+        socklen_t fl = sizeof from;
+        gq_path rpath;
+        ssize_t n = wait_datagram (a, wait_ms, buf, sizeof buf, &from, &fl,
+                                   &rpath);
 
           if (n > 0 && !lose (a))
             {
@@ -397,8 +561,8 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
                                        sizeof reply, &rl, &acc);
                   if (act == GQ_ADMIT_REPLY)
                     {
-                      sendto (a->fd, reply, rl, 0, (struct sockaddr *) &from,
-                              fl);
+                      sendto (a->fds[0], reply, rl, 0,
+                              (struct sockaddr *) &from, fl);
                       continue;
                     }
                   if (act != GQ_ADMIT_ACCEPT)
@@ -414,7 +578,7 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
                 {
                   gq_conn_stats st;
 
-                  gq_conn_recv (a->c, now_us (), buf, (size_t) n);
+                  gq_conn_recv_path (a->c, now_us (), &rpath, buf, (size_t) n);
                   if (getenv ("GQ_DEBUG"))
                     {
                       gq_conn_get_stats (a->c, &st);
@@ -474,6 +638,7 @@ main (int argc, char **argv)
       else if (!strcmp (o, "--connections") && v) connections = atoi (v), i++;
       else if (!strcmp (o, "--v2")) a.v2 = 1;
       else if (!strcmp (o, "--retry")) a.retry = 1;
+      else if (!strcmp (o, "--migrate")) a.migrate = 1;
       else if (!strcmp (o, "--versions") && v)
         {
           /* Comma separated list of 1 and 2, most preferred first.  */
@@ -502,6 +667,9 @@ main (int argc, char **argv)
   a.ev.stream_writable = ev_writable;
   a.ev.closed = ev_closed;
   a.ev.ticket = ev_ticket;
+  a.ev.path_validated = ev_path_validated;
+  a.ev.path_failed = ev_path_failed;
+  a.ev.migrated = ev_migrated;
   g.alpn[0].data = (const uint8_t *) alpn;
   g.alpn[0].len = strlen (alpn);
 
@@ -538,6 +706,16 @@ main (int argc, char **argv)
           return 1;
         }
       freeaddrinfo (ai);
+      {
+        struct sockaddr_in sin;
+        socklen_t sl = sizeof sin;
+
+        a.fds[0] = a.fd;
+        a.nfds = 1;
+        memset (&sin, 0, sizeof sin);
+        if (getsockname (a.fd, (struct sockaddr *) &sin, &sl) == 0)
+          to_addr ((struct sockaddr_storage *) &sin, &a.laddr[0]);
+      }
       printf ("LISTENING\n");
       fflush (stdout);
       while (connections-- > 0)
@@ -584,11 +762,15 @@ main (int argc, char **argv)
       hints.ai_socktype = SOCK_DGRAM;
       if (getaddrinfo (host, port, &hints, &ai) != 0)
         return 1;
-      a.fd = socket (ai->ai_family, SOCK_DGRAM, 0);
+      a.fd = open_socket (&a, 0);
+      if (a.fd < 0)
+        return 1;
       memcpy (&a.peer, ai->ai_addr, ai->ai_addrlen);
       a.plen = ai->ai_addrlen;
       a.have_peer = 1;
       freeaddrinfo (ai);
+      a.cfg.path.local = a.laddr[0];
+      to_addr (&a.peer, &a.cfg.path.remote);
       if (new_conn (&a, &g) != GQ_OK)
         return 1;
       a.expected = npaths;
@@ -600,7 +782,6 @@ main (int argc, char **argv)
         while (opened < npaths && now_us () - start < (uint64_t) timeout
                                                     * 1000000)
           {
-            struct pollfd pfd;
             uint8_t buf[65536];
             uint64_t id;
 
@@ -623,15 +804,17 @@ main (int argc, char **argv)
                   gq_conn_update_keys (a.c, now_us ());
                 continue;
               }
-            pfd.fd = a.fd;
-            pfd.events = POLLIN;
-            if (poll (&pfd, 1, 5) > 0)
-              {
-                ssize_t n = recv (a.fd, buf, sizeof buf, 0);
+            try_migrate (&a);
+            {
+              struct sockaddr_storage from;
+              socklen_t fl;
+              gq_path rp;
+              ssize_t n = wait_datagram (&a, 5, buf, sizeof buf, &from, &fl,
+                                         &rp);
 
-                if (n > 0 && !lose (&a))
-                  gq_conn_recv (a.c, now_us (), buf, (size_t) n);
-              }
+              if (n > 0 && !lose (&a))
+                gq_conn_recv_path (a.c, now_us (), &rp, buf, (size_t) n);
+            }
             gq_conn_on_timeout (a.c, now_us ());
             if (gq_conn_state (a.c) >= GQ_CONN_CLOSING)
               break;

@@ -78,6 +78,8 @@ struct app
   gq_tls_session sess;
   int have_sess;
   uint32_t sess_version;
+  int pv, pf, mig;		/* Path events.  */
+  gq_path last_mig;
 };
 
 struct pkt
@@ -86,6 +88,8 @@ struct pkt
   uint64_t at;
   size_t len;
   uint8_t d[2048];
+  gq_path from;
+  int has_from;
 };
 
 struct net
@@ -100,6 +104,23 @@ struct net
   struct app *app[2];
   int dropped;
   int drop_index;		/* Drop this datagram only (or -1).  */
+  /* Path simulation: the server S, the client's local addresses L[i], and
+     the external addresses a NAT presents for them.  The client's outgoing
+     datagrams appear from m[out_map[i]].ext; a datagram to the client is
+     delivered only if it is addressed to an external address that is alive
+     for incoming traffic.  */
+  int paths;
+  gq_addr S, L[3];
+  struct
+  {
+    gq_addr ext;
+    int local, alive_in;
+    uint64_t to_bytes, from_bytes;	/* Seen at the server side.  */
+  } m[6];
+  int out_map[3];
+  int hold;			/* Stash datagrams to EXT-0 instead of sending.  */
+  struct pkt *held[8];
+  int n_held;
   /* Server admission (NULL keys: the server exists from the start).  */
   gq_token_keys *keys;
   gq_admit_config admit;
@@ -244,6 +265,29 @@ ev_ticket (void *u, const gq_tls_ticket *t, uint32_t version)
 }
 
 static void
+ev_path_validated (void *u, const gq_path *p)
+{
+  (void) p;
+  ((struct app *) u)->pv++;
+}
+
+static void
+ev_path_failed (void *u, const gq_path *p)
+{
+  (void) p;
+  ((struct app *) u)->pf++;
+}
+
+static void
+ev_migrated (void *u, const gq_path *p)
+{
+  struct app *a = u;
+
+  a->mig++;
+  a->last_mig = *p;
+}
+
+static void
 ev_closed (void *u, const gq_conn_close_info *i)
 {
   struct app *a = u;
@@ -311,11 +355,84 @@ pump (struct app *a)
 
 /* ---- The network ---- */
 
+static gq_addr
+mkaddr (const char *s)
+{
+  gq_addr a;
+
+  memset (&a, 0, sizeof a);
+  a.len = (uint8_t) strlen (s);
+  memcpy (a.data, s, a.len);
+  return a;
+}
+
+static int
+addr_same (const gq_addr *a, const gq_addr *b)
+{
+  return a->len == b->len && memcmp (a->data, b->data, a->len) == 0;
+}
+
 static void
-enqueue (struct net *n, int from, const uint8_t *d, size_t len)
+enqueue (struct net *n, int from, const uint8_t *d, size_t len,
+         const gq_path *to)
 {
   struct pkt *p;
   int index = n->total++;
+  gq_path src;
+  int has_from = 0;
+
+  memset (&src, 0, sizeof src);
+  if (n->paths && to)
+    {
+      int i, j;
+
+      if (from == 0)
+        {
+          /* Through the NAT to the server.  */
+          i = 0;
+          while (i < 3 && !addr_same (&n->L[i], &to->local))
+            i++;
+          if (i == 3)
+            i = 0;
+          j = n->out_map[i];
+          src.local = n->S;
+          src.remote = n->m[j].ext;
+          n->m[j].from_bytes += len;
+          has_from = 1;
+        }
+      else
+        {
+          for (j = 0; j < 6; j++)
+            if (n->m[j].ext.len && addr_same (&n->m[j].ext, &to->remote))
+              break;
+          if (j == 6)
+            {
+              n->dropped++;
+              return;
+            }
+          n->m[j].to_bytes += len;
+          if (n->hold && j == 0 && n->n_held < 8 && n->m[0].alive_in)
+            {
+              struct pkt *h = calloc (1, sizeof *h);
+
+              h->len = len;
+              memcpy (h->d, d, len);
+              h->from.local = n->L[n->m[j].local];
+              h->from.remote = n->S;
+              h->has_from = 1;
+              n->held[n->n_held++] = h;
+              return;
+            }
+          if (!n->m[j].alive_in)
+            {
+              n->dropped++;
+              return;
+            }
+          src.local = n->L[n->m[j].local];
+          src.remote = n->S;
+          has_from = 1;
+        }
+    }
 
   if (index == n->drop_index || (n->loss_pct && rnd (n) % 100 < n->loss_pct))
     {
@@ -333,6 +450,8 @@ enqueue (struct net *n, int from, const uint8_t *d, size_t len)
   p->to = 1 - from;
   p->at = n->now + n->latency + (n->reorder && rnd (n) % 4 == 0 ? 7000 : 0);
   p->len = len;
+  p->from = src;
+  p->has_from = has_from;
   memcpy (p->d, d, len);
   if (n->corrupt && index % n->corrupt == 0)
     p->d[rnd (n) % len] ^= 0x20;
@@ -367,11 +486,15 @@ flush (struct net *n)
       }
       while (guard++ < 200)
         {
-          CHECK_EQ (gq_conn_send (a->c, n->now, buf, sizeof buf, &len), GQ_OK);
+          gq_path to;
+
+          memset (&to, 0, sizeof to);
+          CHECK_EQ (gq_conn_send_path (a->c, n->now, buf, sizeof buf, &len,
+                                       &to), GQ_OK);
           if (len == 0)
             break;
           CHECK (len <= 1200);
-          enqueue (n, s, buf, len);
+          enqueue (n, s, buf, len, n->paths ? &to : NULL);
         }
     }
 }
@@ -434,7 +557,7 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
               if (act == GQ_ADMIT_REPLY)
                 {
                   n->replies++;
-                  enqueue (n, 1, reply, rl);
+                  enqueue (n, 1, reply, rl, NULL);
                 }
               else if (act == GQ_ADMIT_ACCEPT)
                 {
@@ -445,7 +568,8 @@ run (struct net *n, int (*done) (struct net *), uint64_t budget_us)
               continue;
             }
           if (n->app[p.to]->c)
-            gq_conn_recv (n->app[p.to]->c, n->now, p.d, p.len);
+            gq_conn_recv_path (n->app[p.to]->c, n->now,
+                               p.has_from ? &p.from : NULL, p.d, p.len);
           continue;
         }
       for (s = 0; s < 2; s++)
@@ -492,6 +616,9 @@ fill_events (gq_conn_events *e, struct app *a)
   e->cid_retired = ev_cid_retired;
   e->new_token = ev_new_token;
   e->ticket = ev_ticket;
+  e->path_validated = ev_path_validated;
+  e->path_failed = ev_path_failed;
+  e->migrated = ev_migrated;
 }
 
 static struct pair *
@@ -1186,6 +1313,340 @@ test_resumption (void)
   g_ring = NULL;
 }
 
+/* ---- Path validation and migration ---- */
+
+static struct pair *
+pair_new_paths (gq_conn_config *ccfg, const gq_conn_config *scfg, uint32_t seed)
+{
+  struct pair *p;
+  gq_conn_config sc = *scfg;
+  int i;
+
+  /* The client is told its path; the server learns it from the first
+     datagram.  */
+  memset (&sc.path, 0, sizeof sc.path);
+  ccfg->path.local = mkaddr ("CLI-L0");
+  ccfg->path.remote = mkaddr ("SRV:443");
+  p = pair_new (ccfg, &sc, 0, seed);
+  p->net.paths = 1;
+  p->net.S = mkaddr ("SRV:443");
+  p->net.L[0] = mkaddr ("CLI-L0");
+  p->net.L[1] = mkaddr ("CLI-L1");
+  p->net.L[2] = mkaddr ("CLI-L2");
+  for (i = 0; i < 3; i++)
+    {
+      char nm[16];
+
+      snprintf (nm, sizeof nm, "EXT-%d", i);
+      p->net.m[i].ext = mkaddr (nm);
+      p->net.m[i].local = i;
+      p->net.m[i].alive_in = 1;
+      p->net.out_map[i] = i;
+    }
+  p->net.m[3].ext = mkaddr ("EXT-0b");	/* Local 0 after a NAT rebinding.  */
+  p->net.m[3].local = 0;
+  return p;
+}
+
+static int
+transfer_done (struct net *n)
+{
+  struct sbuf *s = &n->app[0]->sb[0];
+
+  return s->used && s->fin;
+}
+
+/* Request RESP bytes on the first stream.  */
+static struct sbuf *
+start_transfer (struct pair *p, size_t resp)
+{
+  uint64_t id;
+  struct sbuf *s;
+
+  p->srv.respond = resp;
+  CHECK_EQ (gq_conn_stream_open (p->cli.c, 1, &id), GQ_OK);
+  s = sb_get (&p->cli, id);
+  s->out_total = 20;
+  s->out_fin = 1;
+  return s;
+}
+
+static void
+settle (struct pair *p)
+{
+  CHECK (run (&p->net, both_connected, 30000000));
+  run (&p->net, NULL, 1000000);
+  CHECK (p->cli.mig == 0 && p->srv.mig == 0);
+}
+
+static void
+test_nat_rebinding (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_conn_stats st;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 100);
+  settle (p);
+  s = start_transfer (p, 400000);
+  run (&p->net, NULL, 60000);
+  CHECK (!s->fin && s->n > 0);
+  /* The NAT gives the client a new external address; the old one is gone.  */
+  p->net.out_map[0] = 3;
+  p->net.m[3].alive_in = 1;
+  p->net.m[0].alive_in = 0;
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 400000);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  /* The server noticed, moved, validated the new address; the client never
+     saw a thing.  */
+  run (&p->net, NULL, 500000);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.migrations == 1 && st.path_validations >= 1 && st.path_failures == 0);
+  CHECK (p->srv.mig == 1 && p->srv.pv >= 1 && p->cli.mig == 0);
+  CHECK (addr_same (&p->srv.last_mig.remote, &p->net.m[3].ext));
+  pair_free (p);
+}
+
+static void
+test_active_migration (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_path np, cur;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 101);
+  settle (p);
+  s = start_transfer (p, 400000);
+  run (&p->net, NULL, 40000);
+  np.local = p->net.L[1];
+  np.remote = p->net.S;
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_OK);
+  CHECK (run (&p->net, NULL, 200000) == 0 || 1);
+  CHECK (p->cli.pv == 1 && p->cli.mig == 1);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.local, &p->net.L[1]));
+  /* The old network goes away completely: only the new path carries on.  */
+  p->net.m[0].alive_in = 0;
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 400000);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  CHECK_EQ (p->cli.bad + p->srv.bad, 0);
+  run (&p->net, NULL, 1000000);
+  /* The server followed, and the old connection ID was retired.  */
+  CHECK (p->srv.mig == 1);
+  CHECK (p->srv.retired >= 1);
+  /* Migrating to the path we are on is refused; to a validated one is
+     immediate.  */
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_ERR_INVAL);
+  pair_free (p);
+}
+
+static int
+cli_migrated (struct net *n)
+{
+  return n->app[0]->mig > 0;
+}
+
+/* The server may go on using the old path until it has seen the new one:
+   what arrives there after the client has migrated is still good.  */
+static void
+test_old_path_traffic (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_path np;
+  gq_conn_stats a, b;
+  int i, held;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 108);
+  settle (p);
+  s = start_transfer (p, 300000);
+  run (&p->net, NULL, 30000);
+  p->net.hold = 1;
+  run (&p->net, NULL, 30000);
+  p->net.hold = 0;
+  held = p->net.n_held;
+  CHECK (held > 0);
+  np.local = p->net.L[1];
+  np.remote = p->net.S;
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_OK);
+  /* Stop the moment the client has moved: the server has not yet seen the
+     new path, so the datagrams it sent to the old one are still good.  */
+  CHECK (run (&p->net, cli_migrated, 1000000));
+  CHECK_EQ (p->cli.mig, 1);
+  gq_conn_get_stats (p->cli.c, &a);
+  for (i = 0; i < held; i++)
+    {
+      struct pkt *h = p->net.held[i];
+
+      gq_conn_recv_path (p->cli.c, p->net.now, &h->from, h->d, h->len);
+      free (h);
+    }
+  gq_conn_get_stats (p->cli.c, &b);
+  CHECK_EQ (b.packets_received - a.packets_received, (uint64_t) held);
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 300000);
+  /* But a datagram from an address the client has never heard of is not.  */
+  {
+    gq_path stranger = np;
+    uint8_t junk[100];
+
+    stranger.remote = mkaddr ("STRANGER");
+    memset (junk, 0x41, sizeof junk);
+    gq_conn_get_stats (p->cli.c, &a);
+    gq_conn_recv_path (p->cli.c, p->net.now, &stranger, junk, sizeof junk);
+    gq_conn_get_stats (p->cli.c, &b);
+    CHECK_EQ (a.bytes_received, b.bytes_received);
+  }
+  pair_free (p);
+}
+
+static void
+test_probe (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  gq_path np, cur;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 102);
+  settle (p);
+  np.local = p->net.L[2];
+  np.remote = p->net.S;
+  CHECK_EQ (gq_conn_probe_path (p->cli.c, p->net.now, &np), GQ_OK);
+  run (&p->net, NULL, 300000);
+  /* Validated, but not moved to; the server answered without migrating.  */
+  CHECK_EQ (p->cli.pv, 1);
+  CHECK (p->cli.mig == 0 && p->srv.mig == 0);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.local, &p->net.L[0]));
+  /* Now use it: it is validated already, so the move is immediate.  */
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_OK);
+  CHECK_EQ (p->cli.mig, 1);
+  /* An idle client shows the server nothing; traffic on the new path does
+     (only a non-probing packet counts).  */
+  run (&p->net, NULL, 300000);
+  CHECK_EQ (p->srv.mig, 0);
+  start_transfer (p, 5000);
+  run (&p->net, transfer_done, 5000000);
+  CHECK_EQ (p->srv.mig, 1);
+  pair_free (p);
+}
+
+static void
+test_probe_failure (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_path np, cur;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 103);
+  settle (p);
+  /* The new path works towards the server but not back.  */
+  p->net.m[2].alive_in = 0;
+  np.local = p->net.L[2];
+  np.remote = p->net.S;
+  s = start_transfer (p, 100000);
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_OK);
+  CHECK (run (&p->net, transfer_done, 60000000));
+  run (&p->net, NULL, 5000000);
+  CHECK_EQ (s->n, 100000);
+  CHECK (p->cli.pf == 1 && p->cli.pv == 0 && p->cli.mig == 0);
+  CHECK_EQ (gq_conn_get_path (p->cli.c, &cur), GQ_OK);
+  CHECK (addr_same (&cur.local, &p->net.L[0]));
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
+/* The peer appears at an address that cannot receive: the server moves
+   there at once but sends no more than three times what it received, then
+   returns to the old path when validation fails, and does not follow again
+   for a while.  */
+static void
+test_migration_failure (void)
+{
+  gq_conn_config cfg;
+  struct pair *p;
+  struct sbuf *s;
+  gq_conn_stats st;
+
+  memset (&cfg, 0, sizeof cfg);
+  p = pair_new_paths (&cfg, &cfg, 104);
+  settle (p);
+  s = start_transfer (p, 600000);
+  run (&p->net, NULL, 30000);
+  p->net.out_map[0] = 3;			/* Outgoing appears from EXT-0b,  */
+  p->net.m[3].alive_in = 0;			/* which cannot be answered;  */
+  /* while EXT-0 still reaches the client.  */
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 600000);
+  run (&p->net, NULL, 3000000);
+  gq_conn_get_stats (p->srv.c, &st);
+  CHECK (st.path_failures >= 1);
+  CHECK (p->srv.mig >= 2);			/* There, and back.  */
+  CHECK (p->net.m[3].to_bytes <= 3 * p->net.m[3].from_bytes);
+  CHECK (p->net.m[3].to_bytes > 0);
+  CHECK (addr_same (&p->srv.last_mig.remote, &p->net.m[0].ext));
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  pair_free (p);
+}
+
+static void
+test_migration_limits (void)
+{
+  gq_conn_config cc, sc;
+  struct pair *p;
+  gq_path np;
+  int i, ok = 0, range = 0;
+
+  /* A server that forbids active migration.  */
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  sc.disable_active_migration = 1;
+  p = pair_new_paths (&cc, &sc, 105);
+  settle (p);
+  np.local = p->net.L[1];
+  np.remote = p->net.S;
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_ERR_UNAVAILABLE);
+  CHECK_EQ (gq_conn_probe_path (p->cli.c, p->net.now, &np), GQ_OK);
+  /* A server never migrates on its own.  */
+  CHECK_EQ (gq_conn_migrate (p->srv.c, p->net.now, &np), GQ_ERR_UNAVAILABLE);
+  pair_free (p);
+
+  /* Only as many paths at once as there are fresh connection IDs.  */
+  memset (&cc, 0, sizeof cc);
+  p = pair_new_paths (&cc, &cc, 106);
+  settle (p);
+  for (i = 0; i < 6; i++)
+    {
+      char nm[16];
+
+      snprintf (nm, sizeof nm, "CLI-X%d", i);
+      np.local = mkaddr (nm);
+      np.remote = p->net.S;
+      if (gq_conn_probe_path (p->cli.c, p->net.now, &np) == GQ_OK)
+        ok++;
+      else
+        range++;
+    }
+  CHECK (ok >= 1 && ok <= 3 && range >= 3);
+  /* Before the handshake is confirmed there is no migrating at all.  */
+  pair_free (p);
+  p = pair_new_paths (&cc, &cc, 107);
+  CHECK_EQ (gq_conn_probe_path (p->cli.c, p->net.now, &np), GQ_ERR_INVAL);
+  pair_free (p);
+}
+
 static void
 test_close (void)
 {
@@ -1389,6 +1850,13 @@ main (void)
   test_admit_input ();
   test_compat ();
   test_resumption ();
+  test_nat_rebinding ();
+  test_active_migration ();
+  test_old_path_traffic ();
+  test_probe ();
+  test_probe_failure ();
+  test_migration_failure ();
+  test_migration_limits ();
   test_version_negotiation ();
   test_downgrade ();
   test_close ();

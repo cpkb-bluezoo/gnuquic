@@ -40,6 +40,7 @@ libgnuquic_la_SOURCES = \
   ranges.c \
   conn.c \
   conn_loss.c \
+  conn_path.c \
   conn_recv.c \
   conn_send.c \
   conn_stream.c \

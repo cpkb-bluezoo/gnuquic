@@ -54,6 +54,7 @@ Documentation License''.
 * QUIC connections::      Connection and stream state.
 * Address validation::    Retry, tokens and the admission step.
 * Version negotiation::   Version Negotiation and RFC 9368.
+* Path validation and migration::  Moving between network paths.
 * Roadmap::               Implementation status and plans.
 * Internationalization::  Message catalogues and the translation domain.
 * GNU Free Documentation License::  Copying this manual.
@@ -788,6 +789,53 @@ restarted connection back to the client's preferred version.  Version 2
 has been tested against itself and against the RFC 9369 vectors; none of
 the peers available for interop (quiche, OpenSSL) speaks it.
 
+@node Path validation and migration
+@chapter Path validation and migration
+
+@cindex migration
+@cindex path validation
+The library never sees a socket, so a network path is a pair of opaque
+byte strings the caller chooses (@code{gq_path}: a local and a remote
+address, normally packed IP address and port).  Only equality matters.
+@code{gq_conn_recv_path} says where a datagram came from;
+@code{gq_conn_send_path} says where the datagram it produced must go and
+from which local address.  Most datagrams go to the current path;
+probing datagrams go elsewhere and must be sent exactly there.  The plain
+@code{gq_conn_recv} and @code{gq_conn_send} give no path information and
+turn migration handling off.
+
+@heading Validation
+A path is validated by a PATH_CHALLENGE and the matching PATH_RESPONSE
+(section 8.2): up to three challenges with fresh data over a timeout of at
+least three probe timeouts, in datagrams padded to 1200 bytes when the
+amplification limit allows.  The peer's challenges are answered on the
+path they arrived on.
+
+@heading Peer migration
+A packet that carries a non-probing frame, has the highest packet number
+so far and comes from a new address means the peer moved (section 9.3).
+The connection then sends there at once, using a fresh peer connection ID
+when one is available, limited to three times what has arrived from that
+address until it validates, and validates it.  The previous path is kept
+until then.  If validation fails, the connection goes back to it and
+ignores the failed address for ten seconds so a spoofed or unreachable
+address cannot make it flap.  On a switch the congestion controller and
+RTT estimator start again (section 9.4).  At most three candidate paths
+are tracked.
+
+@heading Active migration
+@code{gq_conn_probe_path} validates a path without moving to it;
+@code{gq_conn_migrate} (clients only, and not if the server set
+disable_active_migration) validates and then moves, retiring the old
+connection ID.  A client keeps accepting datagrams from the server's
+address on any of its sockets, because a server goes on using the old path
+until it has validated the new one; datagrams from other addresses are
+ignored.  Events report path_validated, path_failed and migrated.
+
+@heading Not done
+The server's preferred_address, multipath, and choosing among several
+local addresses are left to the application.
+
 @node Roadmap
 @chapter Roadmap
 
@@ -895,8 +943,12 @@ client's handling of Version Negotiation packets, RFC 9368 version
 information and compatible negotiation between QUIC v1 and v2.
 
 @item
-0-RTT wiring, path validation and migration, DATAGRAM (RFC 9221), and the
-endpoint layer that routes datagrams to connections by connection ID.
+@strong{Done.}  Path validation and migration (@ref{Path validation and
+migration}).
+
+@item
+0-RTT wiring, DATAGRAM (RFC 9221), and the endpoint layer that routes
+datagrams to connections by connection ID.
 @end enumerate
 
 @item

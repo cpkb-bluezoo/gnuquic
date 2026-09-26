@@ -130,6 +130,8 @@ typedef struct rctx
   gq_conn *c;
   int sp;
   int ae;			/* Saw an ack-eliciting frame.  */
+  int nonprobing;		/* Saw a frame other than PADDING and the
+				   path probing ones.  */
   int closing;			/* Saw CONNECTION_CLOSE.  */
 } rctx;
 
@@ -230,6 +232,7 @@ cid_store (gq_conn *c, const gq_frame *f)
             {
               c->dcid = c->p[j].cid;
               c->dcid_seq = c->p[j].seq;
+              conn_path_dcid_changed (c);
               break;
             }
         break;
@@ -273,6 +276,10 @@ on_frame (void *user, const gq_frame *f)
   if (f->type != GQ_FRAME_PADDING && f->type != GQ_FRAME_ACK
       && f->type != GQ_FRAME_CONNECTION_CLOSE)
     x->ae = 1;
+  if (f->type != GQ_FRAME_PADDING && f->type != GQ_FRAME_PATH_CHALLENGE
+      && f->type != GQ_FRAME_PATH_RESPONSE
+      && f->type != GQ_FRAME_NEW_CONNECTION_ID)
+    x->nonprobing = 1;
   if (sp != SP_APP && f->type != GQ_FRAME_PADDING && f->type != GQ_FRAME_PING
       && f->type != GQ_FRAME_ACK && f->type != GQ_FRAME_CRYPTO
       && f->type != GQ_FRAME_CONNECTION_CLOSE)
@@ -284,7 +291,9 @@ on_frame (void *user, const gq_frame *f)
     {
     case GQ_FRAME_PADDING:
     case GQ_FRAME_PING:
+      return 0;
     case GQ_FRAME_PATH_RESPONSE:
+      conn_path_on_response (c, f->u.path_challenge.data, c->now);
       return 0;
     case GQ_FRAME_ACK:
       if (f->u.ack.largest >= c->sp[sp].next_pn)
@@ -340,9 +349,7 @@ on_frame (void *user, const gq_frame *f)
     case GQ_FRAME_RETIRE_CONNECTION_ID:
       return cid_retire (c, f->u.retire_connection_id.seq);
     case GQ_FRAME_PATH_CHALLENGE:
-      if (c->n_path_response < MAX_PATH_RESPONSES)
-        memcpy (c->path_response[c->n_path_response++],
-                f->u.path_challenge.data, 8);
+      conn_path_on_challenge (c, f->u.path_challenge.data);
       return 0;
     case GQ_FRAME_CONNECTION_CLOSE:
       {
@@ -369,7 +376,8 @@ on_frame (void *user, const gq_frame *f)
 
 /* Returns 0 if the connection can go on, -1 if it must stop.  */
 static int
-process_payload (gq_conn *c, int sp, const uint8_t *p, size_t n, int *ae)
+process_payload (gq_conn *c, int sp, const uint8_t *p, size_t n, int *ae,
+                 int *nonprobing)
 {
   rctx x;
   int r;
@@ -377,6 +385,7 @@ process_payload (gq_conn *c, int sp, const uint8_t *p, size_t n, int *ae)
   x.c = c;
   x.sp = sp;
   x.ae = 0;
+  x.nonprobing = 0;
   x.closing = 0;
   if (n == 0)
     {
@@ -385,6 +394,8 @@ process_payload (gq_conn *c, int sp, const uint8_t *p, size_t n, int *ae)
     }
   r = gq_frame_parse (&p, &n, on_frame, &x);
   *ae = x.ae;
+  if (nonprobing)
+    *nonprobing = x.nonprobing;
   if (c->state >= GQ_CONN_CLOSING)
     return -1;
   if (r == GQ_ERR_ENCODING || r == GQ_NEED_MORE)
@@ -654,7 +665,7 @@ recv_long (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t dgram,
       c->p[0].cid = c->dcid;
     }
   c->got_peer_packet = 1;
-  if (process_payload (c, sp, pkt + poff, plen, &ae) != 0)
+  if (process_payload (c, sp, pkt + poff, plen, &ae, NULL) != 0)
     return 1;
   note_received (c, sp, pn, ae, now);
   if (c->role == GQ_ROLE_SERVER && sp == SP_HANDSHAKE)
@@ -675,7 +686,7 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
   const gq_packet_keys *keys;
   size_t pn_len, poff, plen, i;
   uint64_t trunc = 0, pn;
-  int update = 0, ae, r;
+  int update = 0, ae, r, highest, nonprobing = 0;
 
   *used = rem;
   if (!s->have_rk || s->discarded)
@@ -718,11 +729,13 @@ recv_short (gq_conn *c, uint64_t now, uint8_t *pkt, size_t rem, size_t *used)
   if (update)
     rotate_read_keys (c, pn);
   c->got_peer_packet = 1;
-  if (c->role == GQ_ROLE_SERVER)
+  if (c->role == GQ_ROLE_SERVER && conn_path_rx_initial (c))
     c->peer_addr_validated = 1;
-  if (process_payload (c, SP_APP, pkt + poff, plen, &ae) != 0)
+  highest = !s->have_recv || pn > s->largest_recv;
+  if (process_payload (c, SP_APP, pkt + poff, plen, &ae, &nonprobing) != 0)
     return 1;
   note_received (c, SP_APP, pn, ae, now);
+  conn_path_after_packet (c, now, nonprobing, highest);
   return 1;
 failed:
   stateless_reset_check (c, pkt, rem);
@@ -755,7 +768,7 @@ conn_receive_datagram (gq_conn *c, uint64_t now, uint8_t *data, size_t len)
       if (got && !any)
         {
           any = 1;
-          c->bytes_recv += len;
+          conn_path_account_recv (c, len);
           c->st.bytes_received += len;
         }
       if (used == 0)

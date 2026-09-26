@@ -47,7 +47,9 @@ enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 #define MAX_FRAMES_PER_PACKET 48
 #define MAX_LCID 8
 #define MAX_PCID 16
-#define MAX_PATH_RESPONSES 4
+#define MAX_PATHS 4
+#define MAX_CANDIDATES 3
+#define MAX_CHALLENGES 3
 
 /* What a sent packet carried that must be retransmitted if it is lost.  */
 enum sf_type
@@ -55,7 +57,7 @@ enum sf_type
   SF_CRYPTO = 1, SF_STREAM, SF_RESET_STREAM, SF_STOP_SENDING, SF_MAX_DATA,
   SF_MAX_STREAM_DATA, SF_MAX_STREAMS, SF_DATA_BLOCKED,
   SF_STREAM_DATA_BLOCKED, SF_NEW_CID, SF_RETIRE_CID, SF_HANDSHAKE_DONE,
-  SF_ACK, SF_PATH_RESPONSE, SF_NEW_TOKEN
+  SF_ACK, SF_PATH_RESPONSE, SF_NEW_TOKEN, SF_PATH_CHALLENGE
 };
 
 typedef struct sent_frame
@@ -121,6 +123,27 @@ typedef struct pcid
   uint8_t used;
   uint8_t retire;		/* 0: active, 1: RETIRE to send, 2: sent.  */
 } pcid;
+
+/* One network path (RFC 9000 section 8.2, 9).  */
+typedef struct pathinfo
+{
+  gq_path p;
+  uint8_t used;
+  uint8_t initial;		/* The path the handshake ran on.  */
+  uint8_t validated;
+  uint8_t local_init;		/* We started it (probe or migration).  */
+  uint8_t auto_switch;		/* Migrate to it once validated.  */
+  gq_cid dcid;			/* Peer ID used on this path.  */
+  uint64_t dcid_seq;
+  uint64_t recv, sent;		/* Bytes, for the amplification limit.  */
+  uint8_t chal[MAX_CHALLENGES][8];	/* Outstanding challenge data.  */
+  unsigned n_chal;
+  uint8_t need_challenge;
+  unsigned chal_sent;
+  uint64_t chal_next, chal_deadline;
+  uint8_t resp[2][8];		/* Responses owed to the peer on this path.  */
+  unsigned n_resp;
+} pathinfo;
 
 typedef struct stream
 {
@@ -237,8 +260,15 @@ struct gq_conn
   size_t n_streams, cap_streams, rr;
 
   /* Pending control frames.  */
-  uint8_t path_response[MAX_PATH_RESPONSES][8];
-  unsigned n_path_response;
+  pathinfo paths[MAX_PATHS];
+  int cur_path, prev_path;	/* Indices, -1: none.  */
+  int tx_path;			/* Where the datagram being built goes.  */
+  gq_path bad_path[2];		/* Recently failed candidates,  */
+  uint64_t bad_until[2];	/* ignored until then.  */
+  unsigned bad_next;
+  gq_path rx;			/* Where the datagram being processed came from.  */
+  int rx_known;
+  uint64_t path_validations, path_failures, migrations;
 
   /* Closing.  */
   uint8_t close_pending;
@@ -296,6 +326,25 @@ uint64_t stream_initial_send_credit (const gq_conn *c, uint64_t id);
 uint64_t stream_initial_recv_credit (const gq_conn *c, uint64_t id);
 int stream_handle_frame (gq_conn *c, const gq_frame *f);
 void stream_on_acked (gq_conn *c, uint64_t id);
+
+/* conn_path.c */
+void conn_path_init (gq_conn *c, const gq_path *initial);
+void conn_path_rx_begin (gq_conn *c, const gq_path *from);
+void conn_path_rx_end (gq_conn *c);
+int conn_path_accept_rx (const gq_conn *c);
+void conn_path_after_packet (gq_conn *c, uint64_t now, int nonprobing,
+                             int highest);
+void conn_path_account_recv (gq_conn *c, size_t len);
+void conn_path_on_challenge (gq_conn *c, const uint8_t *data);
+void conn_path_on_response (gq_conn *c, const uint8_t *data, uint64_t now);
+int conn_path_probe_pending (gq_conn *c, uint64_t now);
+void conn_path_challenge_data (gq_conn *c, int idx, uint8_t out[8]);
+uint64_t conn_path_deadline (const gq_conn *c);
+void conn_path_on_timeout (gq_conn *c, uint64_t now);
+int conn_path_budget (const gq_conn *c, int idx, uint64_t *budget);
+void conn_path_note_sent (gq_conn *c, int idx, size_t len);
+void conn_path_dcid_changed (gq_conn *c);
+int conn_path_rx_initial (const gq_conn *c);
 
 /* conn_send.c */
 int conn_build_datagram (gq_conn *c, uint64_t now, uint8_t *out, size_t cap,

@@ -48,8 +48,13 @@
    a Version Negotiation packet) and RFC 9368 (compatible negotiation
    between v1 and v2 during the handshake, with downgrade protection).
 
-   Not done here (later steps): 0-RTT, path validation
-   and migration, DATAGRAM frames, and the endpoint layer that routes
+   Path validation and migration (RFC 9000 sections 8.2 and 9) work on
+   opaque addresses the caller supplies (gq_conn_recv_path,
+   gq_conn_send_path): a peer that moves is followed and validated, and a
+   client can migrate or probe paths itself.  The server's
+   preferred_address is not used.
+
+   Not done here (later steps): 0-RTT, DATAGRAM frames, and the endpoint layer that routes
    datagrams to connections.  */
 
 #ifndef GNUQUIC_CONN_H
@@ -100,6 +105,20 @@ enum gq_close_source
   GQ_CLOSE_RESET		/* A stateless reset arrived.  */
 };
 
+/* A network path, as opaque bytes the caller chooses (normally the packed IP
+   address and port).  The library never interprets them; it only compares
+   them.  An empty address (len 0) means unspecified.  */
+typedef struct gq_addr
+{
+  uint8_t len;
+  uint8_t data[31];
+} gq_addr;
+
+typedef struct gq_path
+{
+  gq_addr local, remote;
+} gq_path;
+
 typedef struct gq_conn_close_info
 {
   enum gq_close_source source;
@@ -139,6 +158,13 @@ typedef struct gq_conn_events
   void (*cid_issued) (void *user, const uint8_t *cid, size_t len,
                       const uint8_t token[GQ_RESET_TOKEN_LEN]);
   void (*cid_retired) (void *user, const uint8_t *cid, size_t len);
+  /* Path validation and migration (RFC 9000 sections 8.2 and 9).  A path
+     was validated; a path failed validation; the connection now sends on
+     PATH (the peer migrated, we did, or we fell back after a failed
+     validation).  */
+  void (*path_validated) (void *user, const gq_path *path);
+  void (*path_failed) (void *user, const gq_path *path);
+  void (*migrated) (void *user, const gq_path *path);
   /* Client: NEW_TOKEN from the server, to keep for a later connection.  */
   void (*new_token) (void *user, const uint8_t *token, size_t len);
   /* Client: session ticket for resumption, with the QUIC version of this
@@ -181,6 +207,10 @@ typedef struct gq_conn_config
      first Initial (copied; at most 512 bytes).  */
   const uint8_t *token;
   size_t token_len;
+  /* The path the connection starts on, if known: a client's is its socket
+     and the server's address.  Otherwise the first datagram received
+     defines it.  */
+  gq_path path;
   /* Wall clock in seconds, for token ages.  NULL uses time().  */
   uint64_t (*wall_seconds) (void *user);
   void *wall_user;
@@ -241,6 +271,37 @@ void gq_conn_free (gq_conn *c);
    failure.  A protocol violation by the peer closes the connection and
    is reported through the closed event, not the return value.  */
 int gq_conn_recv (gq_conn *c, uint64_t now_us, uint8_t *data, size_t len);
+
+/* The same with the network path.  gq_conn_recv_path tells the connection
+   where the datagram came from (FROM may be NULL: no path information,
+   which disables migration handling).  gq_conn_send_path also reports where
+   the datagram must go and from which local address (*TO, which may be
+   NULL); most datagrams go to the current path, but probing datagrams
+   (PATH_CHALLENGE, and PATH_RESPONSE to a challenge that arrived on another
+   path) go elsewhere and must be sent there exactly.  */
+int gq_conn_recv_path (gq_conn *c, uint64_t now_us, const gq_path *from,
+                       uint8_t *data, size_t len);
+int gq_conn_send_path (gq_conn *c, uint64_t now_us, uint8_t *out, size_t cap,
+                       size_t *len, gq_path *to);
+
+/* The path the connection currently sends on; GQ_ERR_UNAVAILABLE if it is
+   not known yet.  */
+int gq_conn_get_path (const gq_conn *c, gq_path *path);
+
+/* Start validating PATH without moving to it: a PATH_CHALLENGE goes out on
+   it and the path_validated or path_failed event follows.  Returns GQ_OK,
+   GQ_ERR_INVAL (handshake not confirmed, or the path is the current one),
+   GQ_ERR_RANGE (no unused peer connection ID, or too many paths under
+   validation).  Each new path needs a fresh peer connection ID so the
+   paths cannot be linked (RFC 9000 section 9.5).  */
+int gq_conn_probe_path (gq_conn *c, uint64_t now_us, const gq_path *path);
+
+/* Client: migrate to PATH (RFC 9000 section 9.2): validate it, then move
+   there and retire the old connection ID; the migrated event reports it.
+   An already validated path is used at once.  GQ_ERR_UNAVAILABLE if the
+   server forbids active migration (disable_active_migration) or this is a
+   server; other errors as gq_conn_probe_path.  */
+int gq_conn_migrate (gq_conn *c, uint64_t now_us, const gq_path *path);
 
 /* Produce the next datagram into OUT (capacity CAP, which must be at
    least the configured max_udp_payload).  *LEN is 0 when there is
@@ -314,6 +375,7 @@ typedef struct gq_conn_stats
   uint64_t congestion_events;
   uint64_t key_updates;
   unsigned pto_count;
+  uint64_t path_validations, path_failures, migrations;
 } gq_conn_stats;
 
 void gq_conn_get_stats (const gq_conn *c, gq_conn_stats *st);
