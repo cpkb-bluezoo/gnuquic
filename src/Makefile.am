@@ -28,10 +28,17 @@ libgnuquic_la_SOURCES = \
   policy.c \
   protect.c \
   record.c \
+  record12.c \
   replay.c \
   sign.c \
   status.c \
   tickets.c \
+  tls12.c \
+  tls12_int.h \
+  tls12_server.c \
+  tls12conn.c \
+  tls12ks.c \
+  tls12msg.c \
   tls.c \
   tls_int.h \
   tls_server.c \
@@ -60,11 +67,16 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/policy.h \
   $(top_srcdir)/include/gnuquic/protect.h \
   $(top_srcdir)/include/gnuquic/record.h \
+  $(top_srcdir)/include/gnuquic/record12.h \
   $(top_srcdir)/include/gnuquic/replay.h \
   $(top_srcdir)/include/gnuquic/sign.h \
   $(top_srcdir)/include/gnuquic/status.h \
   $(top_srcdir)/include/gnuquic/tickets.h \
   $(top_srcdir)/include/gnuquic/tls.h \
+  $(top_srcdir)/include/gnuquic/tls12.h \
+  $(top_srcdir)/include/gnuquic/tls12conn.h \
+  $(top_srcdir)/include/gnuquic/tls12ks.h \
+  $(top_srcdir)/include/gnuquic/tls12msg.h \
   $(top_srcdir)/include/gnuquic/tlsconn.h \
   $(top_srcdir)/include/gnuquic/tlsmsg.h \
   $(top_srcdir)/include/gnuquic/tparams.h \

@@ -16,7 +16,7 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* A small TLS 1.3 server used to test GNU QUIC against independent
+/* A small TLS 1.3 (or, with --tls12, TLS 1.2) server used to test GNU QUIC against independent
    clients (openssl s_client, gnutls-cli).  It is a test tool: it accepts
    one connection, echoes what it receives, and prints machine-readable
    lines for tests/interop.sh.
@@ -41,6 +41,7 @@
 #include <gnuquic/status.h>
 #include <gnuquic/policy.h>
 #include <gnuquic/tlsconn.h>
+#include <gnuquic/tls12conn.h>
 
 #include "interop-util.h"
 
@@ -61,8 +62,15 @@ struct state
   int resumed;
   int key_update_after, chunks;
   gq_tlsconn *conn;
+  gq_tls12conn *conn12;
+  int tls12;
   int done;
 };
+
+#define S_SEND(s, d, n) ((s)->tls12 ? gq_tls12conn_send ((s)->conn12, d, n) \
+                                    : gq_tlsconn_send ((s)->conn, d, n))
+#define S_CLOSE(s) ((s)->tls12 ? gq_tls12conn_close ((s)->conn12) \
+                               : gq_tlsconn_close ((s)->conn))
 
 static int
 xwrite (void *u, const uint8_t *d, size_t n)
@@ -91,14 +99,14 @@ xdata (void *u, const uint8_t *d, size_t n)
   struct state *s = u;
 
   s->chunks++;
-  if (gq_tlsconn_send (s->conn, d, n) != GQ_OK)
+  if (S_SEND (s, d, n) != GQ_OK)
     return 1;
   s->echoed += n;
-  if (s->key_update_after && s->chunks == s->key_update_after)
+  if (s->key_update_after && !s->tls12 && s->chunks == s->key_update_after)
     gq_tlsconn_key_update (s->conn, 1);
   if (s->max_bytes && s->echoed >= s->max_bytes)
     {
-      gq_tlsconn_close (s->conn);
+      S_CLOSE (s);
       s->done = 1;
     }
   return 0;
@@ -161,6 +169,12 @@ suite_code (const char *n)
   if (!strcmp (n, "aes128")) return GQ_TLS_AES_128_GCM_SHA256;
   if (!strcmp (n, "aes256")) return GQ_TLS_AES_256_GCM_SHA384;
   if (!strcmp (n, "chacha")) return GQ_TLS_CHACHA20_POLY1305_SHA256;
+  if (!strcmp (n, "ecdsa-aes128")) return GQ_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+  if (!strcmp (n, "ecdsa-aes256")) return GQ_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+  if (!strcmp (n, "ecdsa-chacha")) return GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305;
+  if (!strcmp (n, "rsa-aes128")) return GQ_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+  if (!strcmp (n, "rsa-aes256")) return GQ_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384;
+  if (!strcmp (n, "rsa-chacha")) return GQ_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305;
   return 0;
 }
 
@@ -196,7 +210,7 @@ main (int argc, char **argv)
   struct state st;
   gq_tls_server_config cfg;
   gq_tlsconn_events ev;
-  uint16_t groups[8], suites[4];
+  uint16_t groups[8], suites[8];
   size_t n_groups = 0, n_suites = 0, i;
   gq_slice alpn[4];
   const char *alpn_names[4];
@@ -239,7 +253,7 @@ main (int argc, char **argv)
         {
           char *l = strdup (v), *tok, *save = NULL;
 
-          for (tok = strtok_r (l, ",", &save); tok && n_suites < 4;
+          for (tok = strtok_r (l, ",", &save); tok && n_suites < 8;
                tok = strtok_r (NULL, ",", &save))
             suites[n_suites++] = suite_code (tok);
         }
@@ -275,6 +289,7 @@ main (int argc, char **argv)
       else if (OPT ("--timeout")) timeout = atoi (v);
       else if (OPT ("--connections")) connections = atoi (v);
       else if (!strcmp (a, "--no-tickets")) tickets = 0;
+      else if (!strcmp (a, "--tls12")) st.tls12 = 1;
       else
         {
           fprintf (stderr, "unknown option %s\n", a);
@@ -319,7 +334,7 @@ main (int argc, char **argv)
     }
   cfg.alpn = alpn;
   cfg.n_alpn = n_alpn;
-  if (n_groups)
+  if (n_groups && !st.tls12)
     {
       cfg.groups = groups;
       cfg.n_groups = n_groups;
@@ -366,7 +381,8 @@ main (int argc, char **argv)
       ev.connected = xconnected;
       ev.closed = xclosed;
       ev.rekey_records = rekey;
-      if (gq_tlsconn_server_new (&st.conn, &cfg, &ev) != GQ_OK)
+      if ((st.tls12 ? gq_tls12conn_server_new (&st.conn12, &cfg, &ev)
+                    : gq_tlsconn_server_new (&st.conn, &cfg, &ev)) != GQ_OK)
         {
           printf ("result=fail reason=new\n");
           return 1;
@@ -385,7 +401,8 @@ main (int argc, char **argv)
               st.close_error = st.connected ? 0 : GQ_ERR_PROTOCOL;
               break;
             }
-          r = gq_tlsconn_receive (st.conn, buf, (size_t) n);
+          r = st.tls12 ? gq_tls12conn_receive (st.conn12, buf, (size_t) n)
+                       : gq_tlsconn_receive (st.conn, buf, (size_t) n);
         }
       printf ("echoed=%zu\n", st.echoed);
       if (!(r == GQ_OK && st.close_error == 0 && (st.connected || st.done)))
@@ -395,7 +412,10 @@ main (int argc, char **argv)
           all_ok = 0;
         }
       fflush (stdout);
-      gq_tlsconn_free (st.conn);
+      if (st.tls12)
+        gq_tls12conn_free (st.conn12);
+      else
+        gq_tlsconn_free (st.conn);
       close (st.fd);
     }
   if (all_ok)

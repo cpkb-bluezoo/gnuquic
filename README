@@ -43,9 +43,18 @@ Pre-alpha.  What exists today:
            backend behind a replaceable interface)
   policy   the closed set of versions, suites, groups and signature
            schemes the library will ever negotiate
+  tls12ks  TLS 1.2 PRF, extended master secret, key block, Finished
+  tls12msg TLS 1.2 handshake message codecs
+  record12 TLS 1.2 record layer (AES-GCM and ChaCha20-Poly1305)
+  tls12    TLS 1.2 client and server handshake engines: ECDHE on
+           secp256r1 with AEAD suites, mandatory extended master secret
+           and secure renegotiation indication, RFC 5077 tickets,
+           mutual authentication
+  tls12conn  TLS 1.2 over a byte stream; interoperating with OpenSSL and
+           GnuTLS
 
 Not yet written: 0-RTT early data, loss recovery and
-congestion control, connection and stream state, TLS 1.2, DTLS.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
+congestion control, connection and stream state, DTLS.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building
 --------

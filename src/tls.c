@@ -173,7 +173,8 @@ ok_suite (unsigned s)
 static int
 ok_sig (unsigned s)
 {
-  return gq_sigscheme_available (s);
+  return gq_policy_allows_sigscheme (GQ_TLS_1_3, s)
+    && gq_sigscheme_available (s);
 }
 
 /* Apply policy filtering (and defaults) to the preference lists.  */

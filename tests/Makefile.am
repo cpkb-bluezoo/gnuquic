@@ -23,7 +23,8 @@ LDADD = $(top_builddir)/src/libgnuquic.la $(GNUTLS_LIBS)
 UNIT_TESTS = test-varint test-frame test-crypto test-policy test-trust \
   test-packet test-protect test-tparams test-kx test-sign \
   test-tlsmsg test-keysched test-tls-client test-record test-tlsconn test-tls-server \
-  test-resume test-tickets test-early
+  test-resume test-tickets test-early test-tls12ks test-record12 test-tls12 \
+  test-tls12conn
 
 # Interoperability against independent servers (skipped if none installed).
 if HAVE_GNUTLS
@@ -36,4 +37,4 @@ check_PROGRAMS = $(UNIT_TESTS) $(INTEROP_PROGS)
 TESTS_ENVIRONMENT = INTEROP_CLIENT=./interop-client; export INTEROP_CLIENT; \
   INTEROP_SERVER=./interop-server; export INTEROP_SERVER;
 
-EXTRA_DIST = interop.sh interop-util.h tst-util.h tst-x509.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h
+EXTRA_DIST = interop.sh interop-util.h tst-util.h tst-x509.h tst-fix12.h tst-tlspeer.h vectors.h vectors-tls.h vectors-resume.h

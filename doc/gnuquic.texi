@@ -273,7 +273,7 @@ that everything excluded here is rejected.
 @multitable @columnfractions .2 .8
 @headitem Transport @tab Versions
 @item QUIC @tab TLS 1.3 only (required by RFC 9001)
-@item TCP  @tab TLS 1.3, TLS 1.2 (planned)
+@item TCP  @tab TLS 1.3 (@file{tlsconn.h}) or TLS 1.2 (@file{tls12conn.h})
 @item UDP  @tab DTLS 1.3, DTLS 1.2 (planned)
 @end multitable
 
@@ -306,23 +306,81 @@ PSK-only TLS 1.2.
 
 @node TLS 1.2 hardening
 @section TLS 1.2 hardening
+@cindex TLS 1.2
 
-These rules apply when the TLS 1.2 engine is added.
+TLS 1.2 exists for legacy interoperability (mail, older clients) and is a
+deliberately narrower profile than TLS 1.3, the same as in Gumdrop's
+@code{Tls12HandshakeEngine} and Hopf's @code{tls12} engine.  The engine
+(@file{tls12.h}) is a separate state machine from the TLS 1.3 one, and the
+byte-stream wrapper (@file{tls12conn.h}) mirrors @file{tlsconn.h}.  An
+endpoint is one or the other, never both.
 
 @itemize @bullet
 @item
+Key exchange is ECDHE on @code{secp256r1} only.  There is no static RSA
+key transport, no finite-field Diffie-Hellman, no other curve and no
+X25519 or hybrid group on this path.  A peer that does not list
+@code{secp256r1} is refused.
+
+@item
+Suites are the six ECDHE plus AEAD suites of the policy.  ECDSA
+certificates (P-256 and P-384) use the @code{ECDHE_ECDSA} suites and RSA
+certificates the @code{ECDHE_RSA} suites; the server only selects a suite
+that fits its key.
+
+@item
+Signatures: ECDSA and RSA PKCS#1 v1.5 with SHA-2 are produced; the
+engine never signs with RSA-PSS, but accepts it from a peer.  There is no SHA-1, no MD5, no Ed25519 and no ML-DSA on this
+path.  A ClientHello without @code{signature_algorithms} is refused rather
+than assumed to mean SHA-1.
+
+@item
 Extended master secret (RFC 7627) is mandatory.  A peer that does not
-offer it is refused, closing the triple-handshake class of attacks.
+offer or echo it is refused, closing the triple-handshake class of
+attacks.  The non-extended derivation is not implemented.
 
 @item
-Secure renegotiation indication (RFC 5746) is required, and
-renegotiation itself is refused.
+Secure renegotiation indication (RFC 5746) is required (the empty
+extension, or the signalling suite value from a client), and renegotiation
+itself is refused: any handshake message after the handshake, including a
+HelloRequest or a ClientHello, is fatal with @code{no_renegotiation}.
 
 @item
-No compression (CRIME) and no heartbeat.
+No compression (CRIME) and no heartbeat.  A ClientHello offering
+anything but the null compression method is refused.
 
 @item
-Session resumption by RFC 5077 tickets only, with rotating ticket keys.
+Session resumption by RFC 5077 tickets only, sealed under the same
+rotating key ring as TLS 1.3 tickets; there is no session-ID cache.  A
+ticket carries the master secret, so there is no forward secrecy across
+resumptions: the ticket lifetime (default one day, at most seven) and key
+rotation are the mitigation.  A resumed session issues no new ticket, so a
+session cannot be extended past its original lifetime.  A ticket is
+honoured only if it decrypts, is unexpired, names a suite the client
+still offers and the server still allows, was issued for the same server
+name, and (when client certificates are required) came from an
+authenticated session; otherwise a full handshake runs.  TLS 1.3 tickets
+are never accepted by this engine.
+
+@item
+Client certificates: the server sends a CertificateRequest and verifies
+the chain against its trust store or callback.  The certificate must be
+valid for TLS client authentication.  A required client that sends none is
+refused with @code{handshake_failure}.
+
+@item
+There is no in-protocol rekeying in TLS 1.2, so an AES-GCM direction that
+reaches 2^24 records ends the connection (with @code{close_notify}) rather
+than exceeding the confidentiality limit.  ChaCha20-Poly1305 is limited
+only by the 64-bit sequence number.
+
+@item
+No 0-RTT, no KeyUpdate and no downgrade sentinel: because a listener is
+pinned to one version, the RFC 8446 section 4.1.3 sentinel, which exists
+for servers that choose between 1.2 and 1.3 within one handshake, has
+nothing to protect.  A TLS 1.2 server refuses a ClientHello that lists
+@code{supported_versions} without TLS 1.2 (@code{protocol_version}); a
+TLS 1.2 client refuses a ServerHello that carries the extension.
 @end itemize
 
 @node Key exchange
@@ -537,7 +595,14 @@ migration and DATAGRAM (RFC 9221), with interop against quiche and
 others.
 
 @item
-The TLS 1.2 engine (ECDHE plus AEAD, extended master secret).
+@strong{Done.}  The TLS 1.2 engines and record layer over TCP (the
+profile of @ref{TLS 1.2 hardening}): key schedule with the PRF
+checked against published vectors, the 1.2 record layer (AES-GCM and
+ChaCha20-Poly1305), client and server engines with mutual authentication
+and RFC 5077 resumption, and the @file{tls12conn.h} wrapper.  Verified by
+loopback tests that edit each side's flight to check every refusal, and
+by interoperability scenarios against @command{openssl} and GnuTLS in
+both directions.
 
 @item
 DTLS 1.3 and 1.2: record layers, reassembly, retransmission, replay
