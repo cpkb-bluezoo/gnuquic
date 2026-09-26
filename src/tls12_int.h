@@ -47,6 +47,11 @@ enum st12
 struct gq_tls12
 {
   int server;
+  int dtls;			/* DTLS 1.2: transcript in DTLS form.  */
+  uint16_t tx_seq, rx_seq;	/* DTLS message_seq of the next message.  */
+  uint8_t cookie[255];		/* Client: from HelloVerifyRequest.  */
+  size_t cookie_len;
+  int hvr_seen;
   gq_tls_config cfg;		/* Client config; parts reused by servers.  */
   gq_tls_server_config scfg;
   gq_tls12_sink sink;
@@ -117,7 +122,12 @@ int g12_rnd (gq_tls12 *t, void *buf, size_t n);
 uint64_t g12_now_ms (const gq_tls12 *t);
 int g12_in_list (const uint16_t *l, size_t n, unsigned v);
 int g12_gen_kx (gq_tls12 *t);
+/* Add a received (g12_tb_add) or sent (g12_tb_add_tx) handshake message,
+   TLS form, to the transcript.  In DTLS the transcript holds the 12-byte
+   DTLS header with the message_seq and no fragmentation (RFC 6347
+   section 4.2.6).  */
 int g12_tb_add (gq_tls12 *t, const uint8_t *data, size_t len);
+int g12_tb_add_tx (gq_tls12 *t, const uint8_t *data, size_t len);
 int g12_tb_hash (const gq_tls12 *t, uint8_t *out);
 /* Send the message in W and add it to the transcript.  */
 int g12_send (gq_tls12 *t, const gq_wbuf *w);

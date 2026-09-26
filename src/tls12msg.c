@@ -222,11 +222,17 @@ gq_tls12_build_client_hello (gq_wbuf *w, const gq_tls12_ch_params *p)
   size_t i;
 
   gq_wbuf_hs_open (w, GQ_HS_CLIENT_HELLO);
-  gq_wbuf_u16 (w, 0x0303);
+  gq_wbuf_u16 (w, p->dtls ? 0xfefd : 0x0303);
   gq_wbuf_bytes (w, p->random, 32);
   gq_wbuf_open (w, 1);
   gq_wbuf_slice (w, p->session_id);
   gq_wbuf_close (w);
+  if (p->dtls)
+    {
+      gq_wbuf_open (w, 1);		/* cookie */
+      gq_wbuf_slice (w, p->cookie);
+      gq_wbuf_close (w);
+    }
   put_u16_list (w, p->suites, p->n_suites);
   gq_wbuf_u8 (w, 1);			/* compression_methods: */
   gq_wbuf_u8 (w, 0);			/* null only.  */
@@ -245,7 +251,7 @@ gq_tls12_build_client_hello (gq_wbuf *w, const gq_tls12_ch_params *p)
     }
   gq_wbuf_ext_open (w, GQ_EXT_SUPPORTED_VERSIONS);
   gq_wbuf_open (w, 1);
-  gq_wbuf_u16 (w, 0x0303);
+  gq_wbuf_u16 (w, p->dtls ? 0xfefd : 0x0303);
   gq_wbuf_close (w);
   gq_wbuf_close (w);
   gq_wbuf_ext_open (w, GQ_EXT_SUPPORTED_GROUPS);
@@ -295,7 +301,7 @@ void
 gq_tls12_build_server_hello (gq_wbuf *w, const gq_tls12_sh_params *p)
 {
   gq_wbuf_hs_open (w, GQ_HS_SERVER_HELLO);
-  gq_wbuf_u16 (w, 0x0303);
+  gq_wbuf_u16 (w, p->dtls ? 0xfefd : 0x0303);
   gq_wbuf_bytes (w, p->random, 32);
   gq_wbuf_open (w, 1);
   gq_wbuf_slice (w, p->session_id);
@@ -399,6 +405,30 @@ gq_tls12_build_nst (gq_wbuf *w, uint32_t lifetime, gq_slice ticket)
   gq_wbuf_u32 (w, lifetime);
   gq_wbuf_open (w, 2);
   gq_wbuf_slice (w, ticket);
+  gq_wbuf_close (w);
+  gq_wbuf_close (w);
+}
+
+int
+gq_tls12_hvr_parse (gq_slice body, uint16_t *version, gq_slice *cookie)
+{
+  struct rd r = { body.data, body.len };
+  unsigned long v;
+
+  TRY (rd_uint (&r, 2, &v));
+  *version = (uint16_t) v;
+  TRY (rd_vec (&r, 1, cookie));
+  TRY (rd_end (&r));
+  return cookie->len ? GQ_OK : GQ_ERR_ENCODING;
+}
+
+void
+gq_tls12_build_hvr (gq_wbuf *w, gq_slice cookie)
+{
+  gq_wbuf_hs_open (w, GQ_HS12_HELLO_VERIFY_REQUEST);
+  gq_wbuf_u16 (w, 0xfefd);
+  gq_wbuf_open (w, 1);
+  gq_wbuf_slice (w, cookie);
   gq_wbuf_close (w);
   gq_wbuf_close (w);
 }

@@ -16,8 +16,9 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* A DTLS 1.3 client and server built on wolfSSL: the independent peer for
-   tests/interop-dtls.sh.  A test tool, not part of the library, and only
+/* A DTLS 1.3 (or, with --dtls12, DTLS 1.2) client and server built on
+   wolfSSL: the independent peer for tests/interop-dtls.sh and
+   tests/interop-dtls12.sh.  A test tool, not part of the library, and only
    built when wolfSSL with DTLS 1.3 is available.
 
    wolf-dtls client HOST PORT --ca FILE [--sni NAME] [--cert F --key F]
@@ -63,7 +64,7 @@ struct opts
 {
   int server;
   const char *host, *port, *ca, *cert, *key, *sni, *client_auth, *group, *cipher;
-  int twice, messages, cookie, stateless, connections, timeout, ch_frag;
+  int twice, messages, cookie, stateless, connections, timeout, ch_frag, v12;
   unsigned mtu;
 };
 
@@ -139,7 +140,8 @@ report (WOLFSSL *ssl)
 static int
 run_client (struct opts *o, WOLFSSL_SESSION **session, int have_session)
 {
-  WOLFSSL_CTX *ctx = wolfSSL_CTX_new (wolfDTLSv1_3_client_method ());
+  WOLFSSL_CTX *ctx = wolfSSL_CTX_new (o->v12 ? wolfDTLSv1_2_client_method ()
+                                         : wolfDTLSv1_3_client_method ());
   WOLFSSL *ssl;
   struct addrinfo hints, *res, *a;
   struct sockaddr_storage srv;
@@ -352,6 +354,7 @@ main (int argc, char **argv)
       else if (!strcmp (a, "--cookie")) o.cookie = 1;
       else if (!strcmp (a, "--stateless")) o.stateless = 1;
       else if (!strcmp (a, "--ch-frag")) o.ch_frag = 1;
+      else if (!strcmp (a, "--dtls12")) o.v12 = 1;
       else
         {
           fprintf (stderr, "unknown option %s\n", a);
@@ -381,7 +384,8 @@ main (int argc, char **argv)
     }
   else
     {
-      WOLFSSL_CTX *ctx = wolfSSL_CTX_new (wolfDTLSv1_3_server_method ());
+      WOLFSSL_CTX *ctx = wolfSSL_CTX_new (o.v12 ? wolfDTLSv1_2_server_method ()
+                                      : wolfDTLSv1_3_server_method ());
       struct sockaddr_in addr;
       int fd, one = 1, rc = 0, c;
 

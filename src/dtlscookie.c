@@ -32,18 +32,13 @@
 #include <gnuquic/dtlscookie.h>
 
 #include "tls_int.h"		/* gqi_suite_params */
+#include "dtls_int.h"
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
 #define TAG_LEN 16
 #define CHECK_LEN 16
 #define COOKIE_VERSION 1
-
-struct gq_dtls_cookies
-{
-  uint8_t cur[32], prev[32];
-  int have_prev;
-};
 
 int
 gq_dtls_cookies_new (gq_dtls_cookies **out)

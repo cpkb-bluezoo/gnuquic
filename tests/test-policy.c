@@ -71,6 +71,15 @@ main (void)
   CHECK (gq_policy_allows_group_for (GQ_TLS_1_3, GQ_GROUP_X25519));
   CHECK (!gq_policy_allows_group_for (0x0301, GQ_GROUP_SECP256R1));
 
+  /* DTLS 1.2 has the TLS 1.2 profile.  */
+  CHECK (gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_SECP256R1));
+  CHECK (!gq_policy_allows_group_for (GQ_DTLS_1_2, GQ_GROUP_X25519));
+  CHECK (gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_RSA_PKCS1_SHA256));
+  CHECK (!gq_policy_allows_sigscheme (GQ_DTLS_1_2, GQ_SIG_ED25519));
+  CHECK (gq_policy_allows_suite (GQ_DTLS_1_2,
+                                 GQ_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305));
+  CHECK (!gq_policy_allows_suite (GQ_DTLS_1_2, GQ_TLS_AES_128_GCM_SHA256));
+
   /* Every default is itself permitted, and PQ hybrids lead.  */
   l = gq_policy_default_groups (&n);
   CHECK (n > 0 && l[0] == GQ_GROUP_X25519_MLKEM768);

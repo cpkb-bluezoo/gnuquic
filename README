@@ -59,9 +59,14 @@ Pre-alpha.  What exists today:
            flights, ACKs, retransmission timers and KeyUpdate
   dtlscookie  stateless cookie exchange for servers; interoperating with
            wolfSSL
+  dtls12rec  DTLS 1.2 records (AES-GCM and ChaCha20-Poly1305)
+  dtls12   DTLS 1.2 association: the TLS 1.2 engine in DTLS mode with
+           whole-flight retransmission
+  dtls12cookie  stateless HelloVerifyRequest for servers; interoperating
+           with OpenSSL, GnuTLS and wolfSSL
 
 Not yet written: 0-RTT early data, loss recovery and
-congestion control, connection and stream state, DTLS 1.2.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
+congestion control, connection and stream state.  See the manual (doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building
 --------

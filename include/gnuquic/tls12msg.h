@@ -118,6 +118,8 @@ typedef struct gq_tls12_ch_params
   size_t n_cert_sigalgs;
   int have_ticket;		/* Send a session_ticket extension...  */
   gq_slice ticket;		/* ...with this ticket (may be empty).  */
+  int dtls;			/* DTLS 1.2: version 0xfefd, the cookie field.  */
+  gq_slice cookie;		/* DTLS: from a HelloVerifyRequest, else empty.  */
 } gq_tls12_ch_params;
 
 /* Always sent: supported_versions {TLS 1.2}, supported_groups
@@ -132,6 +134,7 @@ typedef struct gq_tls12_sh_params
   uint16_t cipher_suite;
   int issue_ticket;		/* Empty session_ticket extension.  */
   gq_slice alpn;		/* Empty: no ALPN extension.  */
+  int dtls;			/* DTLS 1.2: version 0xfefd.  */
 } gq_tls12_sh_params;
 
 /* Always includes extended_master_secret and renegotiation_info.  */
@@ -153,6 +156,12 @@ void gq_tls12_build_ske (gq_wbuf *w, gq_slice params, uint16_t scheme,
 void gq_tls12_build_certreq (gq_wbuf *w, const uint16_t *sigalgs, size_t n);
 
 void gq_tls12_build_server_hello_done (gq_wbuf *w);
+
+/* DTLS 1.2 HelloVerifyRequest (RFC 6347 section 4.2.1), handshake type 3:
+   the server's version (0xfefd) and a cookie of 1 to 255 bytes.  */
+#define GQ_HS12_HELLO_VERIFY_REQUEST 3
+int gq_tls12_hvr_parse (gq_slice body, uint16_t *version, gq_slice *cookie);
+void gq_tls12_build_hvr (gq_wbuf *w, gq_slice cookie);
 void gq_tls12_build_cke (gq_wbuf *w, gq_slice point);
 void gq_tls12_build_nst (gq_wbuf *w, uint32_t lifetime, gq_slice ticket);
 

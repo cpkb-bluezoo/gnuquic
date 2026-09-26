@@ -262,6 +262,7 @@ that everything excluded here is rejected.
 * Cipher suites::
 * TLS 1.2 hardening::
 * DTLS 1.3::
+* DTLS 1.2::
 * Key exchange::
 * Signatures and certificates::
 * Server behaviour::
@@ -275,7 +276,7 @@ that everything excluded here is rejected.
 @headitem Transport @tab Versions
 @item QUIC @tab TLS 1.3 only (required by RFC 9001)
 @item TCP  @tab TLS 1.3 (@file{tlsconn.h}) or TLS 1.2 (@file{tls12conn.h})
-@item UDP  @tab DTLS 1.3 (@file{dtls.h}); DTLS 1.2 (planned)
+@item UDP  @tab DTLS 1.3 (@file{dtls.h}) or DTLS 1.2 (@file{dtls12.h})
 @end multitable
 
 SSL 3.0, TLS 1.0, TLS 1.1 and DTLS 1.0 are not implemented.  A TLS
@@ -441,14 +442,66 @@ the server's retry then asks for its preferred group, so hybrid
 post-quantum groups are still used.
 
 @item
-Not implemented: 0-RTT (early data), connection IDs, post-handshake
-client authentication and DTLS 1.2, which will be @file{dtls12.h}.
+Not implemented: 0-RTT (early data), connection IDs and post-handshake
+client authentication.  DTLS 1.2 is @ref{DTLS 1.2}.
 @end itemize
 
 Verified against wolfSSL 5.9 as an independent DTLS 1.3 peer in both
 directions (@file{tests/interop-dtls.sh}), including cookies, hybrid
 groups, fragmentation, packet loss, KeyUpdate, resumption and client
 certificates.
+
+@node DTLS 1.2
+@section DTLS 1.2
+@cindex DTLS 1.2
+
+DTLS 1.2 (RFC 6347) is the TLS 1.2 engine in DTLS mode, so it has exactly
+the profile of @ref{TLS 1.2 hardening}: ECDHE on @code{secp256r1} with
+AEAD suites, mandatory extended master secret and secure renegotiation
+indication, RFC 5077 tickets, no compression, no renegotiation.  A peer
+built without RFC 5746 (wolfSSL without secure renegotiation, for
+example) is therefore refused.  What is DTLS's own is in
+@file{dtls12rec.h}, @file{dtls12.h} and @file{dtls12cookie.h}:
+
+@itemize @bullet
+@item
+Records have a cleartext header with a 16-bit epoch and 48-bit sequence
+number; epoch 1 begins at the ChangeCipherSpec.  The epoch and sequence
+number are part of the additional data and of the ChaCha20-Poly1305
+nonce; an AES-GCM record's explicit nonce is taken from the wire, since
+the sender chooses it.  Bad records are dropped silently, replays are
+caught by a 64-record window per epoch, and there is no rekeying: an
+AES-GCM direction stops at 2^24 records.
+
+@item
+The transcript holds the 12-byte DTLS handshake header with the
+message_seq and no fragmentation (unlike DTLS 1.3, which hashes the TLS
+form), and message_seq continues across the cookie exchange.  The engine
+keeps the counters; reassembly is the code DTLS 1.3 uses.
+
+@item
+Reliability is RFC 6347's, which is simpler than DTLS 1.3's: the last
+flight is sent again in full, with fresh record numbers and the same
+epochs, on a timer (1 s doubling to 60 s, six retries) and whenever the
+peer repeats its own last flight.  There are no ACKs.  A flight stays on
+its timer until the engine answers the peer, even after part of the
+peer's reply has arrived, because the rest of that reply can still be
+lost.  The handshake's final flight has no reply, so it is kept without
+a timer and only answers repetitions.  A ChangeCipherSpec that overtakes
+the message before it waits until the engine can take it.
+
+@item
+Address validation is the HelloVerifyRequest.  @code{gq_dtls12_listen}
+answers a first ClientHello with a cookie that is an HMAC over the
+address and the parts of the hello that must not change, so nothing is
+remembered, and the reply reuses the ClientHello's record number as the
+RFC requires.  The client answers a HelloVerifyRequest itself and the
+transcript excludes the first hello and the request.
+@end itemize
+
+Verified in both directions against OpenSSL 3, GnuTLS 3.8 and wolfSSL
+(@file{tests/interop-dtls12.sh}), including cookies, fragmentation and
+packet loss, resumption and client certificates.
 
 @node Key exchange
 @section Key exchange
@@ -672,12 +725,16 @@ by interoperability scenarios against @command{openssl} and GnuTLS in
 both directions.
 
 @item
-@strong{Done for DTLS 1.3, to do for 1.2.}  DTLS 1.3 (RFC 9147): the
+@strong{Done.}  DTLS 1.3 (RFC 9147): the
 record layer with record number encryption and anti-replay, handshake
 fragmentation and reassembly, flights with ACKs and retransmission,
-KeyUpdate, and stateless cookies (@ref{DTLS 1.3}).  DTLS 1.2 (RFC 6347)
-follows, reusing the TLS 1.2 engine with the same reassembly and
-retransmission code.  Still open for DTLS 1.3: 0-RTT and connection IDs.
+KeyUpdate, and stateless cookies (@ref{DTLS 1.3}).  Still open for DTLS
+1.3: 0-RTT and connection IDs.
+
+@item
+@strong{Done.}  DTLS 1.2 (RFC 6347) on the TLS 1.2 engine, with the
+DTLS 1.3 fragment reassembly, whole-flight retransmission and a
+stateless HelloVerifyRequest listener (@ref{DTLS 1.2}).
 
 @item
 Examples: an HTTP/3 (QPACK) client and server and a DoQ (RFC 9250)

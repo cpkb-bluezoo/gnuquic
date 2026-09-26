@@ -149,8 +149,8 @@ g12_filter (gq_tls12 *t, const uint16_t *suites, size_t n_suites,
   filter_list (t->sigs, &t->n_sigs, T12_MAX_SIGS, l, n, ok_sig);
 }
 
-int
-g12_tb_add (gq_tls12 *t, const uint8_t *data, size_t len)
+static int
+tb_append (gq_tls12 *t, const uint8_t *data, size_t len)
 {
   if (len > T12_TB_MAX - t->tb_len)
     return GQ_ERR_RANGE;
@@ -178,6 +178,34 @@ g12_tb_add (gq_tls12 *t, const uint8_t *data, size_t len)
   return GQ_OK;
 }
 
+static int
+tb_add_seq (gq_tls12 *t, const uint8_t *msg, size_t len, uint16_t seq)
+{
+  uint8_t h[12];
+
+  if (!t->dtls)
+    return tb_append (t, msg, len);
+  memcpy (h, msg, 4);			/* type, length */
+  h[4] = (uint8_t) (seq >> 8);
+  h[5] = (uint8_t) seq;
+  h[6] = h[7] = h[8] = 0;		/* fragment_offset 0 */
+  memcpy (h + 9, msg + 1, 3);		/* fragment_length = length */
+  TRY (tb_append (t, h, 12));
+  return tb_append (t, msg + 4, len - 4);
+}
+
+int
+g12_tb_add (gq_tls12 *t, const uint8_t *data, size_t len)
+{
+  return tb_add_seq (t, data, len, t->rx_seq);
+}
+
+int
+g12_tb_add_tx (gq_tls12 *t, const uint8_t *data, size_t len)
+{
+  return tb_add_seq (t, data, len, t->tx_seq);
+}
+
 int
 g12_tb_hash (const gq_tls12 *t, uint8_t *out)
 {
@@ -190,8 +218,9 @@ g12_send (gq_tls12 *t, const gq_wbuf *w)
 {
   if (gq_wbuf_status (w) != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, gq_wbuf_status (w));
-  if (g12_tb_add (t, w->p, w->len) != GQ_OK)
+  if (g12_tb_add_tx (t, w->p, w->len) != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+  t->tx_seq++;
   if (t->sink.send (t->sink.user, w->p, w->len))
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER);
   return GQ_OK;
@@ -407,6 +436,7 @@ gq_tls12_client_new (gq_tls12 **out, const gq_tls_config *cfg,
     return GQ_ERR_NOMEM;
   t->cfg = *cfg;
   t->sink = *sink;
+  t->dtls = cfg->dtls != 0;
   t->alert = -1;
   if (t->cfg.max_message_len == 0)
     t->cfg.max_message_len = 65536;
@@ -464,31 +494,23 @@ session_usable (const gq_tls12 *t)
     && now - s->received_ms < (uint64_t) s->lifetime * 1000;
 }
 
-int
-gq_tls12_start (gq_tls12 *t)
+/* Build and send the ClientHello (again, with the cookie, after a
+   HelloVerifyRequest).  */
+static int
+send_ch (gq_tls12 *t)
 {
   uint8_t buf[GQ_TICKET_MAX + 2048];
   gq_wbuf w;
   gq_tls12_ch_params p;
-  gq_slice sid = { t->sid, 0 };
+  gq_slice sid = { t->sid, t->sid_len };
 
-  if (t == NULL || t->server || t->st != S12_NEW)
-    return GQ_ERR_INVAL;
-  TRY (g12_rnd (t, t->client_random, 32));
   memset (&p, 0, sizeof p);
   p.have_ticket = 1;
-  if (session_usable (t))
+  if (t->offered)
     {
-      /* RFC 5077 section 3.4: a fresh random session ID lets the server
-         signal acceptance by echoing it.  */
-      TRY (g12_rnd (t, t->sid, 32));
-      t->sid_len = 32;
-      sid.len = 32;
       p.ticket.data = t->offered->ticket;
       p.ticket.len = t->offered->ticket_len;
     }
-  else
-    t->offered = NULL;
   p.random = t->client_random;
   p.session_id = sid;
   p.suites = t->suites;
@@ -500,6 +522,8 @@ gq_tls12_start (gq_tls12 *t)
   p.n_sigalgs = t->n_sigs;
   p.cert_sigalgs = cert_sigs;
   p.n_cert_sigalgs = sizeof cert_sigs / sizeof cert_sigs[0];
+  p.dtls = t->dtls;
+  p.cookie = (gq_slice) { t->cookie, t->cookie_len };
 
   gq_wbuf_init (&w, buf, sizeof buf);
   gq_tls12_build_client_hello (&w, &p);
@@ -507,12 +531,53 @@ gq_tls12_start (gq_tls12 *t)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, gq_wbuf_status (&w));
   /* The transcript hash is chosen with the suite; until then the raw
      messages are kept.  */
-  if (g12_tb_add (t, w.p, w.len) != GQ_OK)
+  if (g12_tb_add_tx (t, w.p, w.len) != GQ_OK)
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_NOMEM);
+  t->tx_seq++;
   t->st = S12_C_WAIT_SH;
   if (t->sink.send (t->sink.user, w.p, w.len))
     return g12_fail (t, GQ_ALERT_INTERNAL_ERROR, GQ_ERR_HANDLER);
   return GQ_OK;
+}
+
+int
+gq_tls12_start (gq_tls12 *t)
+{
+  if (t == NULL || t->server || t->st != S12_NEW)
+    return GQ_ERR_INVAL;
+  TRY (g12_rnd (t, t->client_random, 32));
+  if (session_usable (t))
+    {
+      /* RFC 5077 section 3.4: a fresh random session ID lets the server
+         signal acceptance by echoing it.  */
+      TRY (g12_rnd (t, t->sid, 32));
+      t->sid_len = 32;
+    }
+  else
+    t->offered = NULL;
+  return send_ch (t);
+}
+
+/* DTLS: the server wants a cookie (RFC 6347 section 4.2.1).  The first
+   ClientHello and this message are not part of the transcript; the
+   second ClientHello repeats the first with the cookie added.  */
+static int
+c_on_hello_verify_request (gq_tls12 *t, gq_slice body)
+{
+  uint16_t ver;
+  gq_slice cookie;
+  int r = gq_tls12_hvr_parse (body, &ver, &cookie);
+
+  if (r != GQ_OK)
+    return g12_fail_parse (t, r);
+  if (t->hvr_seen || (ver != 0xfefd && ver != 0xfeff))
+    return g12_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
+  memcpy (t->cookie, cookie.data, cookie.len);
+  t->cookie_len = cookie.len;
+  t->hvr_seen = 1;
+  gq_wipe (t->tb, t->tb_len);
+  t->tb_len = 0;
+  return send_ch (t);
 }
 
 /* Validate the ServerHello extensions.  Every one must be something we
@@ -605,9 +670,10 @@ c_on_server_hello (gq_tls12 *t, gq_slice msg, gq_slice body)
 
   if (r != GQ_OK)
     return g12_fail_parse (t, r);
-  if (sh.legacy_version < 0x0303)
+  if (t->dtls ? sh.legacy_version == 0xfeff : sh.legacy_version < 0x0303)
     return g12_fail (t, GQ_ALERT_PROTOCOL_VERSION, GQ_ERR_PROTOCOL);
-  if (sh.legacy_version != 0x0303 || sh.is_hello_retry_request)
+  if (sh.legacy_version != (t->dtls ? 0xfefd : 0x0303)
+      || sh.is_hello_retry_request)
     return g12_fail (t, GQ_ALERT_ILLEGAL_PARAMETER, GQ_ERR_PROTOCOL);
   /* A TLS 1.3 server would say so here; we do not speak it.  */
   if (gq_ext_find (sh.extensions, GQ_EXT_SUPPORTED_VERSIONS, &sv))
@@ -861,6 +927,8 @@ c_dispatch (gq_tls12 *t, gq_slice msg, gq_slice body)
     case S12_C_WAIT_SH:
       if (type == GQ_HS_SERVER_HELLO)
         return c_on_server_hello (t, msg, body);
+      if (type == GQ_HS12_HELLO_VERIFY_REQUEST && t->dtls)
+        return c_on_hello_verify_request (t, body);
       break;
     case S12_C_WAIT_CERT:
       if (type == GQ_HS_CERTIFICATE)
@@ -906,9 +974,12 @@ static int
 dispatch (gq_tls12 *t, gq_slice msg)
 {
   gq_slice body = { msg.data + 4, msg.len - 4 };
+  int r = t->server ? g12_server_dispatch (t, msg, body)
+                    : c_dispatch (t, msg, body);
 
-  return t->server ? g12_server_dispatch (t, msg, body)
-                   : c_dispatch (t, msg, body);
+  /* The message just handled has used its message_seq (DTLS).  */
+  t->rx_seq++;
+  return r;
 }
 
 static size_t
@@ -1009,6 +1080,27 @@ gq_tls12_change_cipher_spec (gq_tls12 *t)
   TRY (g12_install_read (t));
   t->st = S12_C_WAIT_FIN;
   return GQ_OK;
+}
+
+int
+gq_tls12_dtls_prime (gq_tls12 *t, uint16_t rx_seq, uint16_t tx_seq)
+{
+  if (t == NULL || !t->dtls || !t->server || t->st != S12_S_WAIT_CH)
+    return GQ_ERR_INVAL;
+  t->rx_seq = rx_seq;
+  t->tx_seq = tx_seq;
+  return GQ_OK;
+}
+
+int
+gq_tls12_expects_ccs (const gq_tls12 *t)
+{
+  if (t == NULL)
+    return 0;
+  return t->server ? t->st == S12_S_WAIT_CCS
+                   : (t->st == S12_C_WAIT_CCS
+                      || (t->st == S12_C_WAIT_TICKET_OR_CCS
+                          && !t->ticket_expected));
 }
 
 int

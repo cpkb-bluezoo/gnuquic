@@ -120,6 +120,20 @@ void gq_tls12_free (gq_tls12 *tls);
 /* Client: build and send the ClientHello.  */
 int gq_tls12_start (gq_tls12 *tls);
 
+/* DTLS 1.2 (RFC 6347), used by gq_dtls12: with dtls set in the
+   configuration the engine speaks version 0xfefd, keeps the transcript in
+   DTLS form (12-byte handshake headers with message_seq), follows a
+   HelloVerifyRequest on the client and expects its messages in message_seq
+   order, one at a time.  Server side: after the ClientHello1 exchange was
+   answered statelessly (dtls12cookie.h) ClientHello2 arrives as message
+   RX_SEQ and the first message we send is TX_SEQ (both 1).  Must precede
+   the first gq_tls12_feed.  */
+int gq_tls12_dtls_prime (gq_tls12 *tls, uint16_t rx_seq, uint16_t tx_seq);
+
+/* Nonzero when the next thing the engine can accept is the peer's
+   ChangeCipherSpec (DTLS may deliver it early; the caller then waits).  */
+int gq_tls12_expects_ccs (const gq_tls12 *tls);
+
 /* Feed the payload of received handshake records.  Consumes the whole
    buffer (a partial message is held, bounded by max_message_len).  */
 int gq_tls12_feed (gq_tls12 *tls, const uint8_t **buf, size_t *len);
