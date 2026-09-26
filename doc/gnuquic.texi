@@ -53,6 +53,7 @@ Documentation License''.
 * Early data::            0-RTT and its anti-replay rules.
 * QUIC connections::      Connection and stream state.
 * Address validation::    Retry, tokens and the admission step.
+* Version negotiation::   Version Negotiation and RFC 9368.
 * Roadmap::               Implementation status and plans.
 * Internationalization::  Message catalogues and the translation domain.
 * GNU Free Documentation License::  Copying this manual.
@@ -684,7 +685,7 @@ Keys are discarded as the handshake progresses, and the 1-RTT keys are
 updated on request, when the peer updates, and before the AEAD limit.
 
 @heading Limits of this step
-Pacing and ECN, the client's Version Negotiation handling, 0-RTT, path validation and migration, and DATAGRAM are not
+Pacing and ECN, 0-RTT, path validation and migration, and DATAGRAM are not
 implemented yet, and a server needs an endpoint layer above it to route
 datagrams by connection ID (the connection reports the IDs it issues
 through @code{cid_issued}).  The receiving side treats a few limits as
@@ -720,6 +721,46 @@ The client follows a Retry automatically: it verifies the integrity tag,
 keeps the token, switches to the new destination ID and Initial keys and
 sends its first flight again.  It accepts one Retry, and only before
 hearing anything else from the server.
+
+@node Version negotiation
+@chapter Version negotiation
+
+@cindex version negotiation
+Two mechanisms, both automatic once @code{gq_conn_config.versions} lists
+the versions an endpoint is willing to use (most preferred first).
+
+@heading Incompatible: Version Negotiation packets
+A server endpoint answers an Initial in a version it does not offer with
+a Version Negotiation packet (@code{gq_quic_admit} does this, listing its
+own versions).  A client that receives one which echoes its connection
+IDs and does not list the version it used starts over with the first of
+its versions the server lists: new destination ID, Initial keys and
+handshake.  If there is none the connection ends with
+@code{GQ_QERR_VERSION_NEGOTIATION} and the closed event.
+
+@heading Compatible: RFC 9368
+Every connection sends the @code{version_information} transport
+parameter: the version in use and the versions available.  QUIC v1 and v2
+are compatible, so a server that prefers another version than the one the
+client started with (once it has read the client's parameters) answers in
+that version, keeping the handshake and the connection.  The client
+switches on the first Initial it can decrypt under the new version's
+keys; the server keeps accepting the client's Initial packets in the old
+version until the client has switched.
+
+Downgrade protection: a client checks that the server's chosen version is
+the one in use, that a compatible switch came with the parameter, and,
+after a Version Negotiation packet, that the version it restarted with is
+the one it would have chosen from the server's own list.  A forged
+Version Negotiation packet hiding a preferred version is thus caught and
+the connection ends with VERSION_NEGOTIATION_ERROR (0x11).  A server
+checks that the client's chosen version is the version of its first
+Initial.
+
+Only QUIC v1 and v2 are implemented, so compatible negotiation exists
+only between them.  Version 2 has been tested against itself and against
+the RFC 9369 vectors; none of the peers available for interop
+(quiche, OpenSSL) speaks it.
 
 @node Roadmap
 @chapter Roadmap
@@ -820,8 +861,12 @@ pacing, ECN, and a pluggable controller (CUBIC, BBR).
 @item
 @strong{Done.}  Address validation (@ref{Address validation}): Retry and
 NEW_TOKEN tokens, the stateless admission step, and the client's handling
-of Retry.  Still open: the client's handling of Version Negotiation and
-RFC 9368 version information.
+of Retry.  
+
+@item
+@strong{Done.}  Version negotiation (@ref{Version negotiation}): the
+client's handling of Version Negotiation packets, RFC 9368 version
+information and compatible negotiation between QUIC v1 and v2.
 
 @item
 0-RTT wiring, path validation and migration, DATAGRAM (RFC 9221), and the

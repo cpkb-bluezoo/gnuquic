@@ -386,6 +386,8 @@ loop (struct app *a, struct cfgs *g, int timeout_s, int one_shot)
 
                   memset (&ac, 0, sizeof ac);
                   ac.require_retry = a->retry;
+                  memcpy (ac.versions, a->cfg.versions, sizeof ac.versions);
+                  ac.n_versions = a->cfg.n_versions;
                   memcpy (key, &sin->sin_addr, 4);
                   memcpy (key + 4, &sin->sin_port, 2);
                   kl = 6;
@@ -471,6 +473,17 @@ main (int argc, char **argv)
       else if (!strcmp (o, "--connections") && v) connections = atoi (v), i++;
       else if (!strcmp (o, "--v2")) a.v2 = 1;
       else if (!strcmp (o, "--retry")) a.retry = 1;
+      else if (!strcmp (o, "--versions") && v)
+        {
+          /* Comma separated list of 1 and 2, most preferred first.  */
+          const char *q;
+
+          for (q = v; *q && a.cfg.n_versions < GQ_TP_MAX_VERSIONS; q++)
+            if (*q == '1' || *q == '2')
+              a.cfg.versions[a.cfg.n_versions++]
+                = *q == '1' ? GQ_VERSION_1 : GQ_VERSION_2;
+          i++;
+        }
       else if (!strcmp (o, "--key-update")) a.key_update = 1;
       else if (o[0] != '-' && npaths < 64) paths[npaths++] = o;
       else
@@ -482,6 +495,8 @@ main (int argc, char **argv)
   signal (SIGPIPE, SIG_IGN);
   gq_token_keys_init (&a.keys);
   a.cfg.version = a.v2 ? GQ_VERSION_2 : 0;
+  if (a.cfg.n_versions && a.cfg.version == 0)
+    a.cfg.version = a.cfg.versions[0];
   a.ev.user = &a;
   a.ev.connected = ev_connected;
   a.ev.stream_data = ev_data;

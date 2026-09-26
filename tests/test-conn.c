@@ -944,6 +944,145 @@ test_retry_tamper (void)
   pair_free (p);
 }
 
+/* Compatible version negotiation (RFC 9368): the versions both ends end
+   up with, whatever the client started with.  */
+static void
+compat_run (uint32_t cv, const uint32_t *clist, size_t nc,
+            const uint32_t *slist, size_t ns, unsigned loss, uint32_t seed,
+            uint32_t expect)
+{
+  gq_conn_config cc, sc;
+  struct pair *p;
+
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  cc.version = cv;
+  memcpy (cc.versions, clist, nc * sizeof *clist);
+  cc.n_versions = nc;
+  memcpy (sc.versions, slist, ns * sizeof *slist);
+  sc.n_versions = ns;
+  sc.version = slist[0];
+  p = pair_new (&cc, &sc, loss, seed);
+  exchange (p);
+  CHECK_EQ (gq_conn_version (p->cli.c), expect);
+  CHECK_EQ (gq_conn_version (p->srv.c), expect);
+  pair_free (p);
+}
+
+static void
+test_compat (void)
+{
+  static const uint32_t v12[2] = { GQ_VERSION_1, GQ_VERSION_2 };
+  static const uint32_t v21[2] = { GQ_VERSION_2, GQ_VERSION_1 };
+  static const uint32_t v1[1] = { GQ_VERSION_1 };
+  static const uint32_t v2[1] = { GQ_VERSION_2 };
+
+  /* The server prefers v2: a v1 client is moved up.  */
+  compat_run (GQ_VERSION_1, v12, 2, v21, 2, 0, 60, GQ_VERSION_2);
+  /* ...or down.  */
+  compat_run (GQ_VERSION_2, v21, 2, v12, 2, 0, 61, GQ_VERSION_1);
+  /* Same preference: nothing changes.  */
+  compat_run (GQ_VERSION_1, v12, 2, v12, 2, 0, 62, GQ_VERSION_1);
+  compat_run (GQ_VERSION_2, v21, 2, v21, 2, 0, 63, GQ_VERSION_2);
+  /* A server that speaks only one keeps it.  */
+  compat_run (GQ_VERSION_1, v12, 2, v1, 1, 0, 64, GQ_VERSION_1);
+  compat_run (GQ_VERSION_2, v21, 2, v2, 1, 0, 65, GQ_VERSION_2);
+  /* Under loss the switch still completes.  */
+  compat_run (GQ_VERSION_1, v12, 2, v21, 2, 20, 66, GQ_VERSION_2);
+  compat_run (GQ_VERSION_2, v21, 2, v12, 2, 20, 67, GQ_VERSION_1);
+}
+
+/* An incompatible mismatch: Version Negotiation and a restart.  */
+static void
+test_version_negotiation (void)
+{
+  gq_conn_config cc;
+  struct pair *p;
+  static const uint32_t v1[1] = { GQ_VERSION_1 };
+
+  memset (&cc, 0, sizeof cc);
+  cc.version = GQ_VERSION_2;
+  cc.versions[0] = GQ_VERSION_2;
+  cc.versions[1] = GQ_VERSION_1;
+  cc.n_versions = 2;
+  cc.wall_seconds = sim_wall;
+  p = pair_new_admit (&cc, 0, 70, 0, NULL, 0);
+  memcpy (p->net.admit.versions, v1, sizeof v1);
+  p->net.admit.n_versions = 1;
+  p->scfg_conn.versions[0] = GQ_VERSION_1;
+  p->scfg_conn.n_versions = 1;
+  p->scfg_conn.version = GQ_VERSION_1;
+  exchange (p);
+  CHECK_EQ (gq_conn_version (p->cli.c), GQ_VERSION_1);
+  CHECK_EQ (gq_conn_version (p->srv.c), GQ_VERSION_1);
+  CHECK (p->net.replies >= 1);
+  pair_free (p);
+
+  /* No version in common: the client gives up.  */
+  cc.versions[1] = GQ_VERSION_2;
+  cc.n_versions = 1;
+  p = pair_new_admit (&cc, 0, 71, 0, NULL, 0);
+  memcpy (p->net.admit.versions, v1, sizeof v1);
+  p->net.admit.n_versions = 1;
+  run (&p->net, NULL, 2000000);
+  CHECK_EQ (p->cli.closed, 1);
+  CHECK (p->cli.ci.error == GQ_QERR_VERSION_NEGOTIATION
+         && !p->cli.connected);
+  CHECK_EQ (gq_conn_state (p->cli.c), GQ_CONN_DONE);
+  pair_free (p);
+}
+
+/* A forged Version Negotiation packet cannot downgrade the connection: the
+   server's version_information gives it away (RFC 9368 section 5).  */
+static void
+test_downgrade (void)
+{
+  gq_conn_config cc;
+  struct pair *p;
+  uint8_t d1[1500], vn[200], junk[1500];
+  size_t l1, vl, jl;
+  gq_long_header h;
+  static const uint32_t only1[1] = { GQ_VERSION_1 };
+  static const uint32_t only2[1] = { GQ_VERSION_2 };
+
+  memset (&cc, 0, sizeof cc);
+  cc.version = GQ_VERSION_2;
+  cc.versions[0] = GQ_VERSION_2;
+  cc.versions[1] = GQ_VERSION_1;
+  cc.n_versions = 2;
+  cc.wall_seconds = sim_wall;
+  p = pair_new_admit (&cc, 0, 72, 0, NULL, 0);
+  p->scfg_conn.versions[0] = GQ_VERSION_1;
+  p->scfg_conn.versions[1] = GQ_VERSION_2;
+  p->scfg_conn.n_versions = 2;
+  CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, d1, sizeof d1, &l1), GQ_OK);
+  CHECK_EQ (gq_long_header_parse (d1, l1, &h), GQ_OK);
+  while (gq_conn_send (p->cli.c, p->net.now, junk, sizeof junk, &jl) == GQ_OK
+         && jl)
+    ;
+  /* One that lists the version in use is not a real one; nor one that does
+     not echo our IDs.  */
+  CHECK_EQ (gq_vn_build (h.scid.data, h.scid.len, h.dcid.data, h.dcid.len,
+                         only2, 1, 0, vn, sizeof vn, &vl), GQ_OK);
+  gq_conn_recv (p->cli.c, p->net.now, vn, vl);
+  CHECK_EQ (gq_vn_build (h.dcid.data, h.dcid.len, h.scid.data, h.scid.len,
+                         only1, 1, 0, vn, sizeof vn, &vl), GQ_OK);
+  gq_conn_recv (p->cli.c, p->net.now, vn, vl);
+  CHECK_EQ (gq_conn_send (p->cli.c, p->net.now, junk, sizeof junk, &jl),
+            GQ_OK);
+  CHECK_EQ (jl, 0);
+  CHECK_EQ (gq_conn_version (p->cli.c), GQ_VERSION_2);
+  /* A well-formed forgery that hides v2 from the client.  */
+  CHECK_EQ (gq_vn_build (h.scid.data, h.scid.len, h.dcid.data, h.dcid.len,
+                         only1, 1, 0, vn, sizeof vn, &vl), GQ_OK);
+  gq_conn_recv (p->cli.c, p->net.now, vn, vl);
+  CHECK_EQ (gq_conn_version (p->cli.c), GQ_VERSION_1);
+  run (&p->net, NULL, 3000000);
+  CHECK_EQ (p->cli.closed, 1);
+  CHECK (p->cli.ci.error == GQ_QERR_VERSION_NEGOTIATION);
+  pair_free (p);
+}
+
 static void
 test_close (void)
 {
@@ -1143,6 +1282,9 @@ main (void)
   test_tokens ();
   test_retry_tamper ();
   test_admit_input ();
+  test_compat ();
+  test_version_negotiation ();
+  test_downgrade ();
   test_close ();
   test_idle ();
   test_streams_misc ();

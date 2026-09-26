@@ -65,6 +65,7 @@ enum
   GQ_TP_ACTIVE_CONNECTION_ID_LIMIT = 0x0e,
   GQ_TP_INITIAL_SOURCE_CONNECTION_ID = 0x0f,
   GQ_TP_RETRY_SOURCE_CONNECTION_ID = 0x10,
+  GQ_TP_VERSION_INFORMATION = 0x11,	/* RFC 9368.  */
   GQ_TP_MAX_DATAGRAM_FRAME_SIZE = 0x20
 };
 
@@ -73,6 +74,8 @@ typedef struct gq_cid
   uint8_t len;
   uint8_t data[GQ_MAX_CID_LEN];
 } gq_cid;
+
+#define GQ_TP_MAX_VERSIONS 8
 
 typedef struct gq_preferred_address
 {
@@ -112,6 +115,11 @@ typedef struct gq_transport_params
   uint64_t active_connection_id_limit;
   uint64_t max_datagram_frame_size;	/* 0 = DATAGRAM not supported.  */
   gq_preferred_address preferred_address;
+  /* version_information (RFC 9368): the version in use and the versions
+     the sender is willing to use.  */
+  uint32_t chosen_version;
+  uint32_t available_versions[GQ_TP_MAX_VERSIONS];
+  size_t n_available_versions;
 } gq_transport_params;
 
 /* Fill TP with the defaults of RFC 9000 section 18.2 and no parameter

@@ -73,6 +73,8 @@ Pre-alpha.  What exists today:
            by a rotating key (Retry and NEW_TOKEN)
   listen   stateless admission of a first Initial: Version Negotiation,
            Retry, token validation
+  (conn also does Version Negotiation on the client and RFC 9368
+           compatible negotiation between QUIC v1 and v2)
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle

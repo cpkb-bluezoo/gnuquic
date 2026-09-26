@@ -176,6 +176,27 @@ on_param (void *user, uint64_t id, gq_slice v)
       if (!get_cid (v, &tp->retry_source_connection_id))
         goto bad;
       break;
+    case GQ_TP_VERSION_INFORMATION:
+      {
+        size_t i, n;
+
+        /* Chosen version, then the available versions (RFC 9368 s3).  */
+        if (v.len < 4 || v.len % 4 != 0)
+          goto bad;
+        tp->chosen_version = (uint32_t) v.data[0] << 24 | (uint32_t) v.data[1] << 16
+                             | (uint32_t) v.data[2] << 8 | v.data[3];
+        n = v.len / 4 - 1;
+        if (n > GQ_TP_MAX_VERSIONS)
+          n = GQ_TP_MAX_VERSIONS;	/* Keep what fits; the rest is ignored.  */
+        for (i = 0; i < n; i++)
+          tp->available_versions[i] = (uint32_t) v.data[4 + 4 * i] << 24
+            | (uint32_t) v.data[5 + 4 * i] << 16
+            | (uint32_t) v.data[6 + 4 * i] << 8 | v.data[7 + 4 * i];
+        tp->n_available_versions = n;
+        if (tp->chosen_version == 0)
+          goto bad;
+        break;
+      }
     case GQ_TP_STATELESS_RESET_TOKEN:
       if (v.len != GQ_RESET_TOKEN_LEN)
         goto bad;
@@ -378,6 +399,27 @@ gq_tp_encode (const gq_transport_params *tp, enum gq_role sender,
           TRY (put_raw (&w, id, tp->stateless_reset_token,
                         GQ_RESET_TOKEN_LEN));
           break;
+        case GQ_TP_VERSION_INFORMATION:
+          {
+            uint8_t b[4 + 4 * GQ_TP_MAX_VERSIONS];
+            size_t k, n = 0;
+
+            if (tp->n_available_versions > GQ_TP_MAX_VERSIONS
+                || tp->chosen_version == 0)
+              return GQ_ERR_INVAL;
+            for (k = 0; k < 1 + tp->n_available_versions; k++)
+              {
+                uint32_t v = k ? tp->available_versions[k - 1]
+                               : tp->chosen_version;
+
+                b[n++] = (uint8_t) (v >> 24);
+                b[n++] = (uint8_t) (v >> 16);
+                b[n++] = (uint8_t) (v >> 8);
+                b[n++] = (uint8_t) v;
+              }
+            TRY (put_raw (&w, id, b, n));
+            break;
+          }
         case GQ_TP_DISABLE_ACTIVE_MIGRATION:
           TRY (put_raw (&w, id, NULL, 0));
           break;

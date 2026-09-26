@@ -3,6 +3,10 @@ GNU QUIC NEWS - history of user-visible changes.
 * Noteworthy changes in release ?.? (????-??-??) [?]
 
 ** Initial development.  No release has been made.
+** Version negotiation: RFC 9368 version_information transport parameter,
+compatible negotiation between QUIC v1 and v2 during the handshake with
+downgrade protection, and the client's restart after a Version
+Negotiation packet (RFC 9000 section 6.2).
 ** Address validation (token.h, listen.h): Retry and NEW_TOKEN tokens
 bound to the client address, a stateless admission step that answers
 Version Negotiation and Retry, and client handling of Retry; tested
