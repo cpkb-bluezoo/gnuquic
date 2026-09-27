@@ -147,6 +147,15 @@ int gq_hp_mask (enum gq_aead alg, const uint8_t *hp_key, size_t keylen,
                 const uint8_t sample[GQ_HP_SAMPLE_LEN],
                 uint8_t mask[GQ_HP_MASK_LEN]);
 
+/* Single-block AES-128 ECB encryption and decryption: the primitives
+   quiclb.h builds connection ID encryption on
+   (draft-ietf-quic-load-balancers section 5.4).  BLOCK and OUT are 16
+   bytes each and may coincide.  */
+int gq_aes128_ecb_encrypt (const uint8_t key[16], const uint8_t block[16],
+                           uint8_t out[16]);
+int gq_aes128_ecb_decrypt (const uint8_t key[16], const uint8_t block[16],
+                           uint8_t out[16]);
+
 #ifdef __cplusplus
 }
 #endif

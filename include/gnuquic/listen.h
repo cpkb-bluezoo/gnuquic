@@ -54,6 +54,12 @@ typedef struct gq_admit_config
   uint32_t new_token_lifetime_s;	/* 0: one day.  */
   size_t retry_cid_len;		/* Length of the ID chosen in a Retry;
 				   0: 8.  */
+  /* As gq_conn_config's, for the ID chosen in a Retry: draft-ietf-quic-
+     load-balancers requires it to be routable too, since the client
+     addresses the rest of the handshake to it.  Leave both NULL for a
+     random ID.  */
+  int (*cid_gen) (void *user, uint8_t *out, size_t len);
+  void *cid_gen_user;
   /* Versions the server speaks, for Version Negotiation; an Initial in
      any other version is answered with the list.  Empty: v1 and v2.  */
   uint32_t versions[GQ_TP_MAX_VERSIONS];

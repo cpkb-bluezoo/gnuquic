@@ -110,7 +110,10 @@ new_lcid (gq_conn *c, int announced, const gq_cid *fixed)
   l->cid.len = (uint8_t) c->cfg.cid_len;
   if (fixed)
     l->cid = *fixed;
-  if ((!fixed && gq_random (l->cid.data, l->cid.len) != GQ_OK)
+  if ((!fixed && (c->cfg.cid_gen
+                  ? c->cfg.cid_gen (c->cfg.cid_gen_user, l->cid.data,
+                                    l->cid.len)
+                  : gq_random (l->cid.data, l->cid.len)) != GQ_OK)
       || (!c->cfg.reset_token
           && gq_random (l->token, sizeof l->token) != GQ_OK))
     {

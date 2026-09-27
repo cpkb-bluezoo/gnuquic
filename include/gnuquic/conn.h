@@ -244,6 +244,15 @@ typedef struct gq_conn_config
   void (*reset_token) (void *user, const uint8_t *cid, size_t len,
                        uint8_t token[GQ_RESET_TOKEN_LEN]);
   void *reset_user;
+  /* Connection ID generation (draft-ietf-quic-load-balancers): if set,
+     called instead of a random choice for every connection ID this
+     connection mints (the first one and each NEW_CONNECTION_ID), to fill
+     LEN bytes (always CID_LEN above) into OUT.  A nonzero return drops
+     that ID (issuance stops; existing IDs are unaffected).  quiclb.h
+     provides one (gq_quiclb_cid_gen) from a gq_quiclb_config, whose
+     gq_quiclb_cid_len must then be CID_LEN.  Otherwise IDs are random.  */
+  int (*cid_gen) (void *user, uint8_t *out, size_t len);
+  void *cid_gen_user;
   /* 0-RTT, client (RFC 9001 section 4.6): the server's transport parameters
      from the connection that issued the session offered in
      gq_tls_config.resume, as returned by gq_conn_get_peer_params.  With them

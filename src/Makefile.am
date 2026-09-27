@@ -29,6 +29,7 @@ libgnuquic_la_SOURCES = \
   dtls12rec.c \
   dtlscookie.c \
   dtlsauto.c \
+  quiclb.c \
   dtlshs.c \
   dtlsrec.c \
   gettext.h \
@@ -89,6 +90,7 @@ gnuquicinclude_HEADERS = \
   $(top_srcdir)/include/gnuquic/dtls12rec.h \
   $(top_srcdir)/include/gnuquic/dtlscookie.h \
   $(top_srcdir)/include/gnuquic/dtlsauto.h \
+  $(top_srcdir)/include/gnuquic/quiclb.h \
   $(top_srcdir)/include/gnuquic/dtlshs.h \
   $(top_srcdir)/include/gnuquic/dtlsrec.h \
   $(top_srcdir)/include/gnuquic/frame.h \

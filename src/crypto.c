@@ -444,3 +444,39 @@ gq_hp_mask (enum gq_aead alg, const uint8_t *hp_key, size_t keylen,
   gq_wipe (block, sizeof block);
   return r;
 }
+
+static int
+aes128_ecb (const uint8_t key[16], const uint8_t block[16], uint8_t out[16],
+           int decrypt)
+{
+  gcry_cipher_hd_t h;
+  int r = gq_crypto_init ();
+
+  if (r != GQ_OK)
+    return r;
+  if (key == NULL || block == NULL || out == NULL)
+    return GQ_ERR_INVAL;
+  if (gcry_cipher_open (&h, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_ECB, 0))
+    return GQ_ERR_CRYPTO;
+  r = GQ_OK;
+  if (gcry_cipher_setkey (h, key, 16)
+      || (decrypt ? gcry_cipher_decrypt (h, out, 16, block, 16)
+                 : gcry_cipher_encrypt (h, out, 16, block, 16)))
+    r = GQ_ERR_CRYPTO;
+  gcry_cipher_close (h);
+  return r;
+}
+
+int
+gq_aes128_ecb_encrypt (const uint8_t key[16], const uint8_t block[16],
+                       uint8_t out[16])
+{
+  return aes128_ecb (key, block, out, 0);
+}
+
+int
+gq_aes128_ecb_decrypt (const uint8_t key[16], const uint8_t block[16],
+                       uint8_t out[16])
+{
+  return aes128_ecb (key, block, out, 1);
+}

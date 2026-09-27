@@ -114,7 +114,8 @@ gq_quic_admit (const gq_token_keys *keys, const gq_admit_config *cfg,
         n = GQ_MAX_CID_LEN;
       set_cid (&odcid, h.dcid.data, h.dcid.len);
       scid.len = (uint8_t) n;
-      if (gq_random (scid.data, n) != GQ_OK
+      if ((cfg->cid_gen ? cfg->cid_gen (cfg->cid_gen_user, scid.data, n)
+                       : gq_random (scid.data, n)) != GQ_OK
           || gq_token_make (keys, GQ_TOKEN_RETRY, addr, addr_len, &odcid,
                             &scid, now_s, token, &tl) != GQ_OK)
         return GQ_ERR_CRYPTO;

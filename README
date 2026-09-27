@@ -85,6 +85,10 @@ Pre-alpha.  What exists today:
   endpoint many connections behind one socket: routing by connection ID,
            admission (Version Negotiation, Retry), stateless reset, a
            deadline heap; DATAGRAM frames (RFC 9221) in conn
+  quiclb   QUIC-LB connection IDs (draft-ietf-quic-load-balancers): a
+           pluggable generator that encodes a routable server identifier,
+           plaintext or AES-encrypted, into every ID a connection or a
+           Retry mints
   conn     QUIC connection: handshake over CRYPTO frames, packet number
            spaces, ACKs, RTT, loss detection and probe timeouts,
            streams, flow control, connection IDs, key update, idle
@@ -92,7 +96,7 @@ Pre-alpha.  What exists today:
            (RFC 9002 section 7); interoperating with quiche
 
 Not yet written: pacing and ECN, the server's
-preferred_address, QUIC-LB connection IDs, and the HTTP/3 and DoQ examples.  See the manual
+preferred_address, and the HTTP/3 and DoQ examples.  See the manual
 (doc/gnuquic.texi) for the design, security policy and roadmap.
 
 Building

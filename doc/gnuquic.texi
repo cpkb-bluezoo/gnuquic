@@ -851,6 +851,31 @@ seeded per endpoint and routes a datagram by its destination ID.  The
 client's first destination ID stays routed to the server connection it
 created.  All connections of an endpoint use the same ID length.
 
+@cindex QUIC-LB
+@cindex connection ID, routable
+By default every connection ID a server mints is random, which is fine
+for one process but tells an external load balancer nothing.
+@file{quiclb.h} implements QUIC-LB (draft-ietf-quic-load-balancers-21): a
+connection ID whose first octet carries a config id and, plaintext or
+under AES-128 (a single pass at 16 octets, a four-round Feistel
+construction otherwise, both from section 5.4), a server identifier the
+load balancer decodes without keeping any state.  A
+@code{gq_quiclb_config} plugs into @code{gq_conn_config.cid_gen} (every
+connection ID a connection mints, including each
+@code{NEW_CONNECTION_ID}) and @code{gq_admit_config.cid_gen} (the ID
+chosen in a Retry, @ref{Address validation}, which must be routable too
+since the client addresses the rest of the handshake to it) through
+@code{gq_quiclb_cid_gen}; @code{gq_quiclb_cid_len} gives the length to set
+@code{cid_len}/@code{retry_cid_len} to.  A load balancer, or another
+server sharing the configuration, recovers the server id with
+@code{gq_quiclb_decode_server_id} or checks it with @code{gq_quiclb_is_own}.
+Verified against the draft's appendix B test vectors (unencrypted,
+single-pass and both four-pass Feistel cases) and, at the connection
+level, that every ID a server behind a configuration answers to (the
+handshake ID, the spares offered up front, the Retry ID, and the fresh
+one an active migration mints after retiring the old one) decodes to its
+own server id.
+
 @heading Admission
 A long header datagram for an unknown ID goes through
 @code{gq_quic_admit} (@ref{Address validation}): Version Negotiation,
@@ -1130,6 +1155,12 @@ migration}).
 @strong{Done.}  DATAGRAM (RFC 9221) and the endpoint layer (@ref{Endpoint}).
 
 @item
+@strong{Done.}  QUIC-LB connection IDs (@ref{Endpoint}): a pluggable
+connection ID generator that encodes a routable server identifier,
+plaintext or AES-encrypted, into every ID a server mints, including in a
+Retry.
+
+@item
 @strong{Done.}  0-RTT in the QUIC transport (@ref{Early data}).
 @end enumerate
 
@@ -1179,13 +1210,14 @@ preferred_address, multipath, and DTLS 1.3 connection IDs.
 @subheading Planned
 @itemize @bullet
 @item
-QUIC-LB (draft-ietf-quic-load-balancers): connection IDs that encode a
-server identifier (plaintext, stream cipher or block cipher algorithm) so
-that a load balancer routes packets, including after migration, without
-keeping state.  The endpoint would take a pluggable connection ID
-generator, keeping the random default; the server ID must also appear in
-Retry source connection IDs and NEW_CONNECTION_ID.  Needs a
-routing test in the simulated NAT.
+QUIC-LB configuration rotation (@ref{Endpoint}): when a server adopts a
+@code{gq_quiclb_config} with a different config id, re-issue enough
+connection IDs under the new one and set @code{retire_prior_to} so the
+old ones are retired, as Gumdrop's @code{ConnectionIdManager.rotateTo}
+does; a keyed configuration replaces as many IDs as are active, up to
+the peer's limit, while an unkeyed one issues a single replacement since
+plaintext IDs are not rotated for unlinkability.  Today a
+@code{gq_quiclb_config} is fixed for a connection's lifetime.
 
 @item
 Gaps found by comparing with Gumdrop and Hopf: certificate compression

@@ -28,6 +28,7 @@
 #include <gnuquic/conn.h>
 #include <gnuquic/listen.h>
 #include <gnuquic/packet.h>
+#include <gnuquic/quiclb.h>
 
 #include "tst-util.h"
 
@@ -1650,6 +1651,103 @@ test_active_migration (void)
   pair_free (p);
 }
 
+/* Every connection ID a server behind a QUIC-LB configuration issues
+   stays routable to it: the handshake ID, the spare ones offered up
+   front, the Retry ID (RFC 9000 section 8.1.2, which the draft also
+   requires to be routable), and the fresh one minted after an active
+   migration retires the old one.  */
+static void
+check_all_routable (const gq_quiclb_config *lb, gq_conn *c)
+{
+  gq_cid cids[8];
+  size_t n = gq_conn_local_cids (c, cids, 8), i;
+
+  CHECK (n >= 1);
+  for (i = 0; i < n; i++)
+    CHECK (gq_quiclb_is_own (lb, cids[i].data, cids[i].len));
+}
+
+static void
+test_quiclb_routing (void)
+{
+  gq_quiclb_config lb;
+  gq_conn_config cc, sc;
+  struct pair *p;
+  struct sbuf *s;
+  gq_path np;
+  uint8_t sid[2] = { 0x11, 0x22 };
+
+  CHECK_EQ (gq_quiclb_config_init (&lb, 4, sid, sizeof sid, 8, NULL, 1),
+           GQ_OK);
+  memset (&cc, 0, sizeof cc);
+  memset (&sc, 0, sizeof sc);
+  sc.cid_len = gq_quiclb_cid_len (&lb);
+  sc.cid_gen = gq_quiclb_cid_gen;
+  sc.cid_gen_user = &lb;
+  p = pair_new_paths (&cc, &sc, 105);
+  settle (p);
+  check_all_routable (&lb, p->srv.c);	/* Handshake ID and the spares.  */
+  s = start_transfer (p, 400000);
+  run (&p->net, NULL, 40000);
+  np.local = p->net.L[1];
+  np.remote = p->net.S;
+  CHECK_EQ (gq_conn_migrate (p->cli.c, p->net.now, &np), GQ_OK);
+  run (&p->net, NULL, 200000);
+  p->net.m[0].alive_in = 0;
+  CHECK (run (&p->net, transfer_done, 60000000));
+  CHECK_EQ (s->n, 400000);
+  CHECK_EQ (p->cli.closed + p->srv.closed, 0);
+  run (&p->net, NULL, 1000000);
+  CHECK (p->srv.mig == 1 && p->srv.retired >= 1);
+  check_all_routable (&lb, p->srv.c);	/* Post-migration ID too.  */
+  pair_free (p);
+}
+
+/* The Retry ID a server behind QUIC-LB hands out is routable before any
+   association exists, since RFC 9000 requires the client to address the
+   rest of the handshake to it.  */
+static void
+test_quiclb_retry_routable (void)
+{
+  gq_quiclb_config lb;
+  gq_token_keys keys;
+  gq_admit_config ac;
+  gq_conn_accept acc;
+  gq_long_header h;
+  uint8_t sid[3] = { 0xaa, 0xbb, 0xcc };
+  uint8_t dg[1300], out[1500], addr[4] = { 9, 9, 9, 9 };
+  size_t rl, hl, got_len;
+  uint8_t got[8];
+
+  CHECK_EQ (gq_quiclb_config_init (&lb, 2, sid, sizeof sid, 8, NULL, 1),
+           GQ_OK);
+  memset (&ac, 0, sizeof ac);
+  ac.require_retry = 1;
+  ac.retry_cid_len = gq_quiclb_cid_len (&lb);
+  ac.cid_gen = gq_quiclb_cid_gen;
+  ac.cid_gen_user = &lb;
+  gq_token_keys_init (&keys);
+  memset (dg, 0, sizeof dg);
+  {
+    uint8_t dcid[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, scid[4] = { 9, 9, 9, 9 };
+
+    CHECK_EQ (gq_long_header_build (GQ_PKT_INITIAL, GQ_VERSION_1, dcid, 8,
+                                    scid, 4, NULL, 0, 0, 1, 1100, dg,
+                                    sizeof dg, &hl), GQ_OK);
+  }
+  CHECK_EQ (gq_quic_admit (&keys, &ac, addr, 4, dg, 1200, 5, out, sizeof out,
+                           &rl, &acc), GQ_ADMIT_REPLY);
+  CHECK_EQ (gq_long_header_parse (out, rl, &h), GQ_OK);
+  CHECK_EQ (h.type, (unsigned) GQ_PKT_RETRY);
+  CHECK_EQ (h.scid.len, gq_quiclb_cid_len (&lb));
+  got_len = sizeof got;
+  CHECK_EQ (gq_quiclb_decode_server_id (&lb, h.scid.data, h.scid.len, got,
+                                       &got_len), GQ_OK);
+  CHECK (got_len == sizeof sid && memcmp (got, sid, sizeof sid) == 0);
+  CHECK (gq_quiclb_is_own (&lb, h.scid.data, h.scid.len));
+  gq_token_keys_wipe (&keys);
+}
+
 static int
 cli_migrated (struct net *n)
 {
@@ -2237,6 +2335,8 @@ main (void)
   test_probe_failure ();
   test_migration_failure ();
   test_migration_limits ();
+  test_quiclb_routing ();
+  test_quiclb_retry_routable ();
   test_version_negotiation ();
   test_downgrade ();
   test_close ();

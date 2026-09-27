@@ -14,6 +14,16 @@ can be pinned to one version (for a port per version, and tests). QUIC
 stays TLS 1.3 only. In a combined hello the 1.2 client accepts X25519
 and secp384r1 ECDHE curves as well as secp256r1 (only when it also
 offered 1.3). The interop tools use the negotiating front.
+** QUIC-LB connection IDs (quiclb.h, draft-ietf-quic-load-balancers-21): a
+pluggable connection ID generator that encodes a routable server
+identifier into every ID a connection mints (the handshake ID, each
+NEW_CONNECTION_ID) and into a Retry's ID, plaintext or under AES-128 (a
+single AES pass at 16 octets, a four-round Feistel construction
+otherwise). Plugs into gq_conn_config.cid_gen and
+gq_admit_config.cid_gen; the random default is unaffected when neither is
+set. Verified against the draft's appendix B test vectors and, through a
+full handshake and an active migration, that a server behind one keeps
+answering to IDs that decode to its own server id throughout.
 ** 0-RTT (RFC 9001 section 4.6): a client that resumes a session sends
 stream data and datagrams in its first flight under the remembered server
 limits; a server accepts them once per ticket (single use replay cache)
