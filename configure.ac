@@ -26,7 +26,10 @@ AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
 AC_CONFIG_HEADERS([config.h])
 
-AM_INIT_AUTOMAKE([1.16 -Wall -Werror foreign subdir-objects
+dnl "gnu" strictness (the default) is what a GNU package must have: it
+dnl has automake itself refuse a "make dist" that is missing README,
+dnl INSTALL, NEWS, AUTHORS, ChangeLog or COPYING.
+AM_INIT_AUTOMAKE([1.16 -Wall -Werror subdir-objects
                   color-tests parallel-tests])
 AM_SILENT_RULES([yes])
 

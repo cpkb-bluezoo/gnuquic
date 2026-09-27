@@ -1,2 +1,3 @@
-See the version control history for details.  A ChangeLog will be
-generated from it for releases.
+This file is a placeholder.  In a checkout, see the git history
+(git log) for change details.  "make dist" replaces this file in the
+distributed tarball with one generated from that history.

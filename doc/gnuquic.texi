@@ -91,6 +91,9 @@ GNU QUIC is written in ISO C99 and is built with @option{-std=c99}
 @option{-pedantic}.  It builds with no compiler warnings, and the build
 system is expected to keep it that way.
 
+Please report bugs, including documentation bugs, to
+@email{bug-gnuquic@@gnu.org}.
+
 @node Design
 @chapter Design
 

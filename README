@@ -112,6 +112,11 @@ Requires libgcrypt >= 1.11 and, by default, GnuTLS >= 3.8.
 Use --without-gnutls to build without certificate validation.  The build
 is expected to be free of compiler warnings.
 
+Reporting bugs
+--------------
+
+Report bugs, including documentation bugs, to <bug-gnuquic@gnu.org>.
+
 Licence
 -------
 

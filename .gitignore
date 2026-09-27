@@ -7,6 +7,9 @@
 /config.h.in
 /config.h.in~
 /build-aux/
+# automake --add-missing's generic installation instructions; "make dist"
+# distributes whatever autogen.sh puts here.
+/INSTALL
 Makefile.in
 /ABOUT-NLS
 
@@ -55,6 +58,9 @@ Makefile
 !/tests/test-*.c
 /tests/interop-client
 /tests/interop-server
+/tests/interop-dtls
+/tests/interop-quic
+/tests/wolf-dtls
 
 # Manual: built by "make info", "make pdf", "make html"
 /doc/*.info

@@ -25,3 +25,19 @@ pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = gnuquic.pc
 
 EXTRA_DIST = COPYING.LESSER HACKING build-aux/config.rpath
+
+## The committed ChangeLog is a placeholder (see its own text); a release
+## tarball gets a real one generated from the git history instead, newest
+## first, in the traditional format.  Do nothing to it in a checkout that
+## is not a git repository (a rebuild from an already-unpacked tarball).
+.PHONY: gen-ChangeLog
+gen-ChangeLog:
+	@if test -d "$(top_srcdir)/.git"; then \
+	  (cd "$(top_srcdir)" \
+	   && git log --date=short \
+	        --pretty='%ad  %an  <%ae>%n%n%w(76,8,8)* %s%n%+b') \
+	    > "$(distdir)/cl-t" \
+	  && rm -f "$(distdir)/ChangeLog" \
+	  && mv "$(distdir)/cl-t" "$(distdir)/ChangeLog"; \
+	fi
+dist-hook: gen-ChangeLog
