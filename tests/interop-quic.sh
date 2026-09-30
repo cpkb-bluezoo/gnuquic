@@ -1,5 +1,5 @@
 #!/bin/sh
-# QUIC interoperability: the GNU QUIC connection against quiche (its
+# QUIC interoperability: the quickstep connection against quiche (its
 # quiche-client and quiche-server), in both directions, over real UDP
 # sockets, speaking hq-interop (HTTP/0.9 style requests).  Skipped (exit 77)
 # when the programs or openssl are missing, or GQ_NO_INTEROP is set.
@@ -8,9 +8,9 @@
 #
 # Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 #
-# This file is part of GNU QUIC.
+# This file is part of quickstep.
 #
-# GNU QUIC is free software: you can redistribute it and/or modify it
+# quickstep is free software: you can redistribute it and/or modify it
 # under the terms of the GNU Lesser General Public License as published
 # by the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.

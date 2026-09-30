@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -20,9 +20,9 @@
 # include <config.h>
 #endif
 
-#include <gnuquic/status.h>
-#include <gnuquic/crypto.h>
-#include <gnuquic/tickets.h>
+#include <quickstep/status.h>
+#include <quickstep/crypto.h>
+#include <quickstep/tickets.h>
 
 #include "tst-util.h"
 
@@ -171,7 +171,7 @@ test_malformed_payload (void)
   CHECK_EQ (gq_ticket_keys_add (k, key, 1), GQ_OK);
 
   /* Recompute the key name the way the ring does.  */
-  memcpy (in, "gnuquic ticket:", 16);
+  memcpy (in, "quickstep-tick:", 16);
   memcpy (in + 16, key, 32);
   CHECK_EQ (gq_hash_compute (GQ_HASH_SHA256, in, sizeof in, h, 32), GQ_OK);
   memcpy (name, h, 16);

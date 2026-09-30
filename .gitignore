@@ -30,7 +30,7 @@ Makefile.in
 /config.status
 /libtool
 /stamp-h1
-/gnuquic.pc
+/quickstep.pc
 Makefile
 .deps/
 .libs/
@@ -82,9 +82,9 @@ Makefile
 /doc/*.t2p
 
 # Release tarballs and distcheck trees
-/gnuquic-*.tar.*
-/gnuquic-*.zip
-/gnuquic-[0-9]*/
+/quickstep-*.tar.*
+/quickstep-*.zip
+/quickstep-[0-9]*/
 
 # Editors and OS
 *~

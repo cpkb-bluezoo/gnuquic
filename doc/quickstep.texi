@@ -1,0 +1,1269 @@
+\input texinfo   @c -*-texinfo-*-
+@c %**start of header
+@setfilename quickstep.info
+@include version.texi
+@settitle quickstep @value{VERSION}
+@documentencoding UTF-8
+@c %**end of header
+
+@copying
+This manual is for quickstep (version @value{VERSION}, @value{UPDATED}),
+a QUIC engine and TLS stack written in C.
+
+Copyright @copyright{} 2026 Chris Burdess.
+
+@quotation
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the section entitled ``GNU Free
+Documentation License''.
+@end quotation
+@end copying
+
+@dircategory Software libraries
+@direntry
+* quickstep: (quickstep).          QUIC engine and TLS stack.
+@end direntry
+
+@titlepage
+@title quickstep
+@subtitle A QUIC engine and TLS stack in C
+@subtitle for version @value{VERSION}, @value{UPDATED}
+@author Chris Burdess
+@page
+@vskip 0pt plus 1filll
+@insertcopying
+@end titlepage
+
+@contents
+
+@ifnottex
+@node Top
+@top quickstep
+
+@insertcopying
+@end ifnottex
+
+@menu
+* Introduction::          What quickstep is and is not.
+* Design::                Layers, the push-parser contract, layout.
+* Security policy::       What is negotiated, and what is absent.
+* Early data::            0-RTT and its anti-replay rules.
+* QUIC connections::      Connection and stream state.
+* Endpoint::              Many connections behind one socket.
+* Address validation::    Retry, tokens and the admission step.
+* Version negotiation::   Version Negotiation and RFC 9368.
+* Path validation and migration::  Moving between network paths.
+* Roadmap::               Implementation status and plans.
+* Internationalization::  Message catalogues and the translation domain.
+* GNU Free Documentation License::  Copying this manual.
+* Concept index::
+@end menu
+
+@node Introduction
+@chapter Introduction
+
+quickstep is an engine for QUIC (RFC 9000) and the TLS 1.3 handshake it
+depends on, and also for TLS 1.2 and 1.3 over TCP and DTLS 1.2 and 1.3
+over UDP.  It is released under the GNU Lesser General Public License,
+version 3 or any later version.
+
+For QUIC it provides versions 1 and 2 with compatible version negotiation,
+streams and flow control, loss recovery with NewReno congestion control,
+address validation (Retry and tokens), 0-RTT, path validation and
+migration, DATAGRAM frames, and an endpoint layer that serves many
+connections from one socket.  Pacing, ECN and the server's
+preferred_address are not implemented.
+
+The library is the C member of a family: Gumdrop (Java) and Hopf (Rust)
+established the architecture, and this project ports it to C under the
+conventions of the GNU project.
+
+The goal is an engine on which an HTTP/3 client and server and a DNS
+over QUIC (DoQ) implementation can be written.  It is a library of
+state machines and codecs.  It owns no sockets, threads or timers: the
+embedding application supplies UDP or TCP input and output, a clock,
+and, if it wants concurrency, its own event loop.
+
+quickstep is written in ISO C99 and is built with @option{-std=c99}
+@option{-pedantic}.  It builds with no compiler warnings, and the build
+system is expected to keep it that way.
+
+Please report bugs, including documentation bugs, to
+@email{bug-quickstep@@gnu.org}.
+
+@node Design
+@chapter Design
+
+@menu
+* Layers::                From codecs down to the crypto library.
+* Crypto::                libgcrypt only, no homegrown primitives.
+* Trust::                 X.509 behind an interface.
+* Key exchange and signatures::  The @file{kx.h} and @file{sign.h} facades.
+* The push-parser contract::  How every parser and engine takes input.
+* Source layout::         Where things are.
+* Testing::               Unit, simulated and interop tests.
+@end menu
+
+@node Layers
+@section Layers
+@cindex layers
+
+@example
+   HTTP/3, DoQ, ...                (applications, not in this tree)
+   ---------------------------------------------------------------
+   endpoint    many connections behind one socket: routing, admission
+   quic        connection, streams, flow control, recovery, migration
+   tls / dtls  handshake engines and record layers (1.3 and 1.2)
+   codec       varint, frame, packet, transport parameters, handshake msgs
+   ---------------------------------------------------------------
+   crypto      hashes, HMAC, HKDF, AEAD, header protection, KEM   (libgcrypt)
+   trust       X.509 loading and chain validation                 (GnuTLS)
+   policy      the closed list of what may be negotiated
+@end example
+
+Upper layers see only @file{crypto.h}, @file{trust.h} and
+@file{policy.h}.  Nothing above @file{crypto.c} and @file{trust.c}
+includes @file{<gcrypt.h>} or @file{<gnutls/@dots{}>}.
+
+@node Crypto
+@section Crypto: libgcrypt only
+@cindex libgcrypt
+@cindex post-quantum
+
+@file{src/crypto.c} wraps libgcrypt and adds only protocol glue defined
+by RFCs: HKDF-Extract and HKDF-Expand (RFC 5869, built on libgcrypt HMAC
+because TLS needs extract and expand separately), HKDF-Expand-Label
+(RFC 8446 section 7.1) and the QUIC key schedule (RFC 9001 section 5).
+Each is checked against the vectors in its RFC (@file{tests/test-crypto.c}).
+No primitive is implemented in this tree.
+
+Findings from probing the installed libgcrypt 1.12.4:
+
+@itemize @bullet
+@item
+ML-KEM-512, 768 and 1024 are implemented (@code{gcry_kem_*}), so the
+hybrid key exchange groups @code{X25519MLKEM768},
+@code{SecP256r1MLKEM768} and @code{SecP384r1MLKEM1024} (RFC 10024) can be
+built from libgcrypt alone: classical ECDH plus ML-KEM, combined as the
+RFC specifies.
+
+@item
+ML-DSA has a reserved algorithm ID (@code{GCRY_PK_MLDSA}) but no
+implementation, and GnuTLS 3.8.13 declares ML-DSA-44, 65 and 87 but the
+installed build has no backend for them.  Neither library gives
+post-quantum signatures on the development machine.  The policy lists
+the ML-DSA schemes, the signature module reports
+@code{GQ_ERR_UNAVAILABLE} for them, and they become available when a
+backend provides them.  Post-quantum key exchange is unaffected.
+
+@item
+ECDH for X25519, secp256r1 and secp384r1 is done through libgcrypt's KEM
+interface (@code{GCRY_KEM_RAW_*}), which fits TLS key shares exactly.
+For the NIST curves libgcrypt returns the whole shared point and TLS uses
+the x coordinate only.  Invalid peer points are rejected by libgcrypt.
+
+@item
+X25519, Ed25519, Ed448, AES-GCM, ChaCha20-Poly1305 and HKDF are all
+present.
+@end itemize
+
+If a second library is ever required for post-quantum support it goes
+behind @file{crypto.h} as another backend, selected at configure time,
+and must be licence-compatible with the LGPL version 3 or later.
+
+@node Trust
+@section Trust: X.509 behind an interface
+@cindex certificates
+@cindex GnuTLS
+
+Gumdrop delegates certificate validation to the JVM and Hopf uses webpki
+and the platform roots.  In C the equivalent is
+@file{include/quickstep/trust.h}: a trust store, and
+@code{gq_trust_verify_chain} taking DER certificates and an optional host
+name.  The first implementation calls GnuTLS (LGPL version 2.1 or later,
+which is compatible).  Because callers only see @code{gq_trust}, a later
+in-tree implementation (ASN.1 DER decoding, RFC 5280 path validation,
+RFC 9525 name matching) can replace it without touching the engines.
+
+The validation policy is fixed.  SHA-1 and MD5 signature chains fail,
+RSA keys under 2048 bits fail, dates are always checked, and the leaf must
+be usable for the stated purpose (TLS server or client authentication).
+
+@node Key exchange and signatures
+@section Key exchange and signatures
+
+@file{kx.h} is the key exchange facade: @code{gq_kx_generate} (client),
+@code{gq_kx_respond} (server) and @code{gq_kx_complete} (client) for all
+six groups in the policy, with the hybrid concatenation orders of
+RFC 10024.  It uses libgcrypt only.
+
+@file{sign.h} is the signature facade for CertificateVerify: load a PEM
+private key, take the public key from a peer's certificate, and sign and
+verify with the policy's schemes, checking that scheme and key type fit
+(ECDSA schemes bind the curve).  Signatures go through GnuTLS because it
+already parses the keys and certificates; the interface hides that, as
+@file{trust.h} does.  RSA under 2048 bits is refused everywhere.
+
+@node The push-parser contract
+@section The push-parser contract
+@cindex push parser
+
+The pattern is taken from Gumdrop's @code{H2Parser} and
+@code{QuicFrameParser}, Hopf's @code{ProtocolHandler::receive} and the
+@code{underflow} flag of jprotobuf:
+
+@itemize @bullet
+@item
+Input arrives as chunks.  A parser never blocks or reads a descriptor.
+
+@item
+A parser takes @code{(const uint8_t **buf, size_t *len)}, consumes
+complete units and advances both.  The caller keeps the tail and
+re-presents it with more data (@code{GQ_NEED_MORE}).
+
+@item
+One forward pass, events to a handler, payloads as slices into the
+caller's buffer, no object graphs and no whole-message buffering.
+
+@item
+Units are all-or-nothing, so no event fires for a half-received frame.
+@end itemize
+
+@code{gq_frame_parse} is the model: a @code{gq_frame} tagged union is
+delivered transiently on the stack.  ACK ranges are not expanded into an
+array; the event carries the validated raw range section and
+@code{gq_ack_foreach} walks it.  Tests run the same corpus whole and in
+every chunk size from 1 to 64.
+
+Engines (TLS, DTLS, and the QUIC connection) follow the reactive style
+of Gumdrop's @code{HandshakeEngine} and Hopf's @code{TlsEngine}: feed
+input in, receive events out through a sink structure of callbacks, with
+explicit state enumerations.  The caller pumps them.  No engine performs
+I/O.
+
+@node Source layout
+@section Source layout
+
+@table @file
+@item include/quickstep/
+Public headers (installed).  By layer: @file{varint.h}, @file{frame.h},
+@file{packet.h}, @file{protect.h}, @file{tparams.h} (QUIC codecs);
+@file{ranges.h}, @file{stream.h}, @file{conn.h}, @file{token.h},
+@file{listen.h}, @file{endpoint.h} (QUIC state); @file{tls.h},
+@file{tlsconn.h}, @file{tls12.h}, @file{tls12conn.h}, @file{dtls.h},
+@file{dtls12.h} and their record and cookie modules (handshake engines and
+transports); @file{crypto.h}, @file{kx.h}, @file{sign.h}, @file{trust.h},
+@file{tickets.h}, @file{replay.h}, @file{policy.h} (facades and policy).
+@item src/
+The library, @file{libquickstep}.
+@item tests/
+One program per module, run by @command{make check}, and the interop
+programs (@ref{Testing}).
+@item doc/
+This manual.
+@item po/
+Message catalogues.
+@end table
+
+Symbols carry the @code{gq_} or @code{GQ_} prefix, and the exported list
+is restricted by @code{-export-symbols-regex '^gq_'}.
+
+@node Testing
+@section Testing
+
+@command{make check} runs a unit test per module (RFC vectors where they
+exist), loopback tests that pair engines and connections over a
+simulated network with a virtual clock (loss, reordering, duplication,
+corruption, NAT rebinding), and interoperability scripts against
+independent implementations: @file{tests/interop.sh} (TLS against OpenSSL
+and GnuTLS), @file{tests/interop-dtls.sh} and @file{tests/interop-dtls12.sh}
+(DTLS against wolfSSL, OpenSSL and GnuTLS) and @file{tests/interop-quic.sh}
+(QUIC against quiche: handshakes, loss, Retry, Version Negotiation, key
+update, migration, DATAGRAM, 0-RTT and concurrent clients, both
+directions).  Scripts skip themselves (exit 77) when their peers are
+missing; set @env{GQ_NO_INTEROP} to skip them, @env{GQ_INTEROP_FILTER} to
+run scenarios whose names contain a string, and @env{QUICHE_DIR} to name
+the directory holding @command{quiche-client} and @command{quiche-server}.
+The library is also run under AddressSanitizer and UndefinedBehaviorSanitizer.
+
+@node Security policy
+@chapter Security policy
+@cindex security policy
+
+The stance is the same as Gumdrop and Hopf: implement the modern,
+defensible subset and nothing else.  Every item below is absent by
+design, not disabled by default.  The lists are stated as code in
+@file{include/quickstep/policy.h}, and @file{tests/test-policy.c} asserts
+that everything excluded here is rejected.
+
+@menu
+* Versions::
+* Cipher suites::
+* TLS 1.2 hardening::
+* DTLS 1.3::
+* DTLS 1.2::
+* QUIC policy::
+* Key exchange::
+* Signatures and certificates::
+* Server behaviour::
+* Other rules::
+@end menu
+
+@node Versions
+@section Versions
+
+@multitable @columnfractions .2 .8
+@headitem Transport @tab Versions
+@item QUIC @tab QUIC v1 and v2 (@file{conn.h}), with TLS 1.3 only (required by RFC 9001)
+@item TCP  @tab TLS 1.3 (@file{tlsconn.h}) or TLS 1.2 (@file{tls12conn.h})
+@item UDP  @tab DTLS 1.3 (@file{dtls.h}) or DTLS 1.2 (@file{dtls12.h})
+@end multitable
+
+SSL 3.0, TLS 1.0, TLS 1.1 and DTLS 1.0 are not implemented.
+
+@cindex version negotiation, TLS and DTLS
+@cindex downgrade sentinel
+Over TCP and UDP the version is negotiated by default
+(@file{tlsauto.h}, @file{dtlsauto.h}).  The two engines stay separate
+state machines; a thin front decides which one runs.  A server looks at the
+ClientHello: if it offers @code{supported_versions} with (D)TLS 1.3 the 1.3
+engine serves it, otherwise the 1.2 engine does, so one listener (one port)
+serves both kinds of peer and prefers 1.3.  A client sends one ClientHello
+that offers both, and continues with whichever the server picked, handing
+the transcript to the 1.2 engine if the ServerHello (or, in DTLS, the
+HelloVerifyRequest) is a 1.2 one.  The decision is made once, from the
+first messages, and is never revisited: neither protocol has
+renegotiation into another version, so an association that was 1.2 stays
+1.2 and there is nothing to re-run.  A TLS 1.2 server that also serves 1.3
+sets the RFC 8446 section 4.1.3 downgrade sentinel in its ServerHello
+random, and a negotiating client that offered 1.3 aborts
+(@code{illegal_parameter}) when it sees it, so an attacker cannot strip
+1.3 from the offer.  Both ends can instead be pinned to one version
+(@code{GQ_TLSAUTO_TLS12}, @code{GQ_TLSAUTO_TLS13} and the
+@code{GQ_DTLSAUTO_} counterparts), which is what a deployment with a port
+per version, or a test, wants; a pinned endpoint refuses the other version
+(@code{protocol_version}) and does not set or check the sentinel.  QUIC is
+never negotiated: RFC 9001 requires TLS 1.3, so the QUIC engine refuses
+anything else and a combined hello is not offered with QUIC.
+
+Two consequences of the combined hello are worth knowing.  The
+@code{supported_groups} list is shared by both versions, so a 1.2 server
+may choose X25519 or secp384r1 for its ECDHE key; the 1.2 client engine
+accepts those two curves for the key exchange only when its ClientHello
+also offered 1.3 (a standalone 1.2 client stays on secp256r1, as
+@ref{TLS 1.2 hardening} says).  And over DTLS a stateless listener must
+decide from the first datagram: a ClientHello with a cookie in its
+@code{legacy_cookie} field answers a DTLS 1.2 HelloVerifyRequest, one with
+the @code{cookie} extension a DTLS 1.3 HelloRetryRequest, and a first
+ClientHello by its @code{supported_versions}.  Without a listener the
+first datagram must hold that extension.
+
+@node Cipher suites
+@section Cipher suites
+
+AEAD only.
+
+@itemize @bullet
+@item
+TLS 1.3 and DTLS 1.3: @code{TLS_AES_256_GCM_SHA384},
+@code{TLS_CHACHA20_POLY1305_SHA256}, @code{TLS_AES_128_GCM_SHA256}.
+
+@item
+TLS 1.2 and DTLS 1.2: ECDHE with ECDSA or RSA authentication and AES-GCM
+or ChaCha20-Poly1305 (six suites).
+@end itemize
+
+Never implemented: CBC suites of any kind (MAC-then-encrypt has a long
+record of timing side channels, Lucky Thirteen and its successors), RC4,
+3DES, export and NULL suites, static RSA key transport (no forward
+secrecy), finite-field Diffie-Hellman, CCM, anonymous suites, and
+PSK-only TLS 1.2.
+
+@node TLS 1.2 hardening
+@section TLS 1.2 hardening
+@cindex TLS 1.2
+
+TLS 1.2 exists for legacy interoperability (mail, older clients) and is a
+deliberately narrower profile than TLS 1.3, the same as in Gumdrop's
+@code{Tls12HandshakeEngine} and Hopf's @code{tls12} engine.  The engine
+(@file{tls12.h}) is a separate state machine from the TLS 1.3 one, and the
+byte-stream wrapper (@file{tls12conn.h}) mirrors @file{tlsconn.h}.  An
+association is one or the other; which one is negotiated at the start
+(@ref{Versions}) and never changes.
+
+@itemize @bullet
+@item
+Key exchange is ECDHE on @code{secp256r1} only.  There is no static RSA
+key transport, no finite-field Diffie-Hellman, no other curve and no
+X25519 or hybrid group on this path.  A peer that does not list
+@code{secp256r1} is refused.
+
+@item
+Suites are the six ECDHE plus AEAD suites of the policy.  ECDSA
+certificates (P-256 and P-384) use the @code{ECDHE_ECDSA} suites and RSA
+certificates the @code{ECDHE_RSA} suites; the server only selects a suite
+that fits its key.
+
+@item
+Signatures: ECDSA and RSA PKCS#1 v1.5 with SHA-2 are produced; the
+engine never signs with RSA-PSS, but accepts it from a peer.  There is no SHA-1, no MD5, no Ed25519 and no ML-DSA on this
+path.  A ClientHello without @code{signature_algorithms} is refused rather
+than assumed to mean SHA-1.
+
+@item
+Extended master secret (RFC 7627) is mandatory.  A peer that does not
+offer or echo it is refused, closing the triple-handshake class of
+attacks.  The non-extended derivation is not implemented.
+
+@item
+Secure renegotiation indication (RFC 5746) is required (the empty
+extension, or the signalling suite value from a client), and renegotiation
+itself is refused: any handshake message after the handshake, including a
+HelloRequest or a ClientHello, is fatal with @code{no_renegotiation}.
+
+@item
+No compression (CRIME) and no heartbeat.  A ClientHello offering
+anything but the null compression method is refused.
+
+@item
+Session resumption by RFC 5077 tickets only, sealed under the same
+rotating key ring as TLS 1.3 tickets; there is no session-ID cache.  A
+ticket carries the master secret, so there is no forward secrecy across
+resumptions: the ticket lifetime (default one day, at most seven) and key
+rotation are the mitigation.  A resumed session issues no new ticket, so a
+session cannot be extended past its original lifetime.  A ticket is
+honoured only if it decrypts, is unexpired, names a suite the client
+still offers and the server still allows, was issued for the same server
+name, and (when client certificates are required) came from an
+authenticated session; otherwise a full handshake runs.  TLS 1.3 tickets
+are never accepted by this engine.
+
+@item
+Client certificates: the server sends a CertificateRequest and verifies
+the chain against its trust store or callback.  The certificate must be
+valid for TLS client authentication.  A required client that sends none is
+refused with @code{handshake_failure}.
+
+@item
+There is no in-protocol rekeying in TLS 1.2, so an AES-GCM direction that
+reaches 2^24 records ends the connection (with @code{close_notify}) rather
+than exceeding the confidentiality limit.  ChaCha20-Poly1305 is limited
+only by the 64-bit sequence number.
+
+@item
+No 0-RTT and no KeyUpdate.  The RFC 8446 section 4.1.3 downgrade sentinel
+is set by a 1.2 server that also serves 1.3 and checked by a client that
+offered 1.3 (@ref{Versions}); a standalone 1.2 endpoint neither sets nor
+checks it.  A 1.2 server refuses a ClientHello that lists
+@code{supported_versions} without TLS 1.2 (@code{protocol_version}); a
+standalone 1.2 client refuses a ServerHello that carries the extension.
+@end itemize
+
+@node DTLS 1.3
+@section DTLS 1.3
+@cindex DTLS
+@cindex cookie
+
+DTLS 1.3 (RFC 9147) is the TLS 1.3 handshake engine in DTLS mode, so the
+suites, groups, signature schemes, resumption and client authentication
+are exactly those of TLS 1.3, including the hybrid post-quantum groups.
+What is DTLS's own is in @file{dtlsrec.h}, @file{dtlshs.h},
+@file{dtls.h} and @file{dtlscookie.h}, and follows RFC 9147:
+
+@itemize @bullet
+@item
+Every HKDF label has the @samp{dtls13} prefix (no trailing space), and
+record sequence numbers are encrypted with a per-epoch key, using the
+same mask construction as QUIC header protection.  The nonce uses the
+64-bit sequence number without the epoch.
+
+@item
+Records carry a 16-bit sequence number and an explicit length; records
+with a connection ID are not ours (connection IDs are not implemented).
+A record that fails authentication or is replayed is dropped silently,
+never answered, and a plaintext alert is honoured only while nothing has
+been protected yet, so nothing that can be forged from outside kills an
+association.
+
+@item
+Handshake messages are fragmented to the datagram size and reassembled,
+whatever the order, duplication and overlap.  Only the message being
+assembled is kept (a later message is dropped and asked for again), so
+the memory per association is bounded by one message.
+
+@item
+Handshake flights are retransmitted with the RFC 9147 backoff (1 s
+doubling to 60 s, six retries by default), fragment by fragment: what
+the peer has acknowledged is not sent again.  ACKs are sent for the last
+flight of the handshake, for tickets and key updates, and when a flight
+arrives out of order or incomplete.
+
+@item
+KeyUpdate moves to the next epoch, and the sender switches only when its
+KeyUpdate is acknowledged.  Rekeying is automatic before the AEAD record
+limit.
+
+@item
+Address validation is stateless.  @code{gq_dtls_listen} answers a first
+ClientHello with a HelloRetryRequest whose cookie (16 bytes of
+HMAC-SHA256 over the client address and the cookie's own fields,
+rotating secrets) also carries what the transcript needs, so a source
+that cannot receive at its address never gets an association, and the
+reply is always smaller than the request.  The client therefore sends a
+small first ClientHello (one classical key share, or none when only
+hybrid groups are configured) and puts the cookie first in the second;
+the server's retry then asks for its preferred group, so hybrid
+post-quantum groups are still used.
+
+@item
+Not implemented: 0-RTT (early data), connection IDs and post-handshake
+client authentication.  DTLS 1.2 is @ref{DTLS 1.2}.
+@end itemize
+
+Verified against wolfSSL 5.9 as an independent DTLS 1.3 peer in both
+directions (@file{tests/interop-dtls.sh}), including cookies, hybrid
+groups, fragmentation, packet loss, KeyUpdate, resumption and client
+certificates.
+
+@node DTLS 1.2
+@section DTLS 1.2
+@cindex DTLS 1.2
+
+DTLS 1.2 (RFC 6347) is the TLS 1.2 engine in DTLS mode, so it has exactly
+the profile of @ref{TLS 1.2 hardening}: ECDHE on @code{secp256r1} with
+AEAD suites, mandatory extended master secret and secure renegotiation
+indication, RFC 5077 tickets, no compression, no renegotiation.  A peer
+built without RFC 5746 (wolfSSL without secure renegotiation, for
+example) is therefore refused.  What is DTLS's own is in
+@file{dtls12rec.h}, @file{dtls12.h} and @file{dtls12cookie.h}:
+
+@itemize @bullet
+@item
+Records have a cleartext header with a 16-bit epoch and 48-bit sequence
+number; epoch 1 begins at the ChangeCipherSpec.  The epoch and sequence
+number are part of the additional data and of the ChaCha20-Poly1305
+nonce; an AES-GCM record's explicit nonce is taken from the wire, since
+the sender chooses it.  Bad records are dropped silently, replays are
+caught by a 64-record window per epoch, and there is no rekeying: an
+AES-GCM direction stops at 2^24 records.
+
+@item
+The transcript holds the 12-byte DTLS handshake header with the
+message_seq and no fragmentation (unlike DTLS 1.3, which hashes the TLS
+form), and message_seq continues across the cookie exchange.  The engine
+keeps the counters; reassembly is the code DTLS 1.3 uses.
+
+@item
+Reliability is RFC 6347's, which is simpler than DTLS 1.3's: the last
+flight is sent again in full, with fresh record numbers and the same
+epochs, on a timer (1 s doubling to 60 s, six retries) and whenever the
+peer repeats its own last flight.  There are no ACKs.  A flight stays on
+its timer until the engine answers the peer, even after part of the
+peer's reply has arrived, because the rest of that reply can still be
+lost.  The handshake's final flight has no reply, so it is kept without
+a timer and only answers repetitions.  A ChangeCipherSpec that overtakes
+the message before it waits until the engine can take it.
+
+@item
+Address validation is the HelloVerifyRequest.  @code{gq_dtls12_listen}
+answers a first ClientHello with a cookie that is an HMAC over the
+address and the parts of the hello that must not change, so nothing is
+remembered, and the reply reuses the ClientHello's record number as the
+RFC requires.  The client answers a HelloVerifyRequest itself and the
+transcript excludes the first hello and the request.
+@end itemize
+
+Verified in both directions against OpenSSL 3, GnuTLS 3.8 and wolfSSL
+(@file{tests/interop-dtls12.sh}), including cookies, fragmentation and
+packet loss, resumption and client certificates.
+
+@node QUIC policy
+@section QUIC
+
+QUIC endpoints speak versions 1 and 2 only.  A server accepts an Initial
+only in a datagram of at least 1200 bytes, and answers unvalidated clients
+at no more than three times what they sent (a client proves its address by
+a token or by completing the handshake); Retry is available always or
+under load, and Retry and NEW_TOKEN tokens are authenticated, bound to the
+client address and expire.  A forged Version Negotiation packet cannot
+downgrade a connection (@ref{Version negotiation}).  Session tickets are
+bound to the QUIC version, and early data is accepted at most once per
+ticket, only with an anti-replay hook, and never without the application
+being able to tell it is replayable (@ref{Early data}).  Unknown
+destination IDs draw a rate limited stateless reset that is smaller than
+its trigger.  Packet protection keys are updated before the AEAD limits,
+and a path's amplification limit applies to every unvalidated address
+(@ref{Path validation and migration}).
+
+@node Key exchange
+@section Key exchange
+
+Hybrid post-quantum groups are preferred (@code{X25519MLKEM768},
+@code{SecP256r1MLKEM768}, @code{SecP384r1MLKEM1024}), then X25519,
+secp256r1 and secp384r1.  There is no secp521r1, no finite-field group
+and no legacy curve.
+
+@node Signatures and certificates
+@section Signatures and certificates
+
+ECDSA (P-256 and P-384), Ed25519, RSA-PSS (RSAE), and ML-DSA-44, 65 and 87
+in TLS 1.3 when a backend supports them.  There are no RSA PKCS#1 v1.5
+signatures in the TLS 1.3 handshake, no SHA-1 and no MD5.
+
+Certificate chains signed with SHA-1 or MD5, or containing RSA keys under
+2048 bits, are rejected by the trust layer (GnuTLS verification profile
+@samp{MEDIUM}, 112-bit security).  Host names are checked against
+subjectAltName only (RFC 9525).
+
+@node Server behaviour
+@section Server behaviour
+
+@itemize @bullet
+@item
+The server chooses the cipher suite and group by its own preference
+list, but never asks for a retry when the client already sent an
+acceptable key share.
+
+@item
+The TLS 1.3 server engine (@file{tls.h}, @file{tlsconn.h}, and QUIC)
+refuses a ClientHello without @code{supported_versions} offering TLS 1.3,
+with @code{protocol_version}; it never falls back to an older protocol
+itself.  TLS 1.2 is served by its own engine (@file{tls12.h},
+@file{tls12conn.h}), and the negotiating front of @ref{Versions}
+(@file{tlsauto.h}, @file{dtlsauto.h}) lets one listener serve both by
+picking the engine from the ClientHello; QUIC always uses the 1.3 engine
+directly.  The 1.2 engine has the mirror-image rule, in @ref{TLS 1.2
+hardening}.
+
+@item
+A client certificate must be valid for TLS client authentication (the
+@code{clientAuth} purpose), signed by a trusted CA, and must sign the
+handshake with a scheme the server listed.  A server never asks for
+client certificates unless it was given a way to verify them.
+
+@item
+Resumption uses (EC)DHE with the PSK, so every resumed session still gets
+forward secrecy; PSK-only resumption is not implemented.  Tickets are
+encrypted and authenticated under a key ring the server controls, bound
+to the server name, expire after at most seven days, and are refused if
+the suite is no longer allowed or, when client certificates are
+required, if the original session was not authenticated.  A wrong binder
+is a fatal error, not a fallback.
+@end itemize
+
+@node Other rules
+@section Other rules
+
+@itemize @bullet
+@item
+0-RTT early data is opt-in per endpoint and needs an anti-replay
+strategy; see @ref{Early data}.
+
+@item
+AEAD usage limits (RFC 8446 section 5.5, RFC 9001 section 6.6) trigger
+rekeying or close.
+
+@item
+OCSP stapling is not part of the handshake engines.  Revocation is a
+policy question for the embedding application, which receives the peer's
+chain.
+
+@item
+Key material is wiped after use.  The library never logs secrets.
+@end itemize
+
+@node Early data
+@chapter Early data (0-RTT)
+@cindex 0-RTT
+@cindex early data
+@cindex replay
+
+Early data lets a client that resumes a session send application data
+in its first flight.  It has weaker properties than the rest of the
+protocol: the data is not forward secret, and it can be replayed by an
+attacker who records the first flight.  quickstep therefore never enables
+it by default and never accepts it without an anti-replay check.
+
+@subheading Server
+
+The server accepts early data for a connection only if all of the
+following hold:
+
+@itemize @bullet
+@item
+The endpoint enabled it (@code{max_early_data} is nonzero) and the
+embedding layer can deliver it.
+
+@item
+The client offered the @code{early_data} extension together with a
+resumption PSK, and the server accepted that PSK.
+
+@item
+The ticket allows early data and the ALPN protocol selected now is the
+one negotiated in the original connection.
+
+@item
+The ticket age reported by the client agrees with the server's own
+measurement to within the configured window (ten seconds by default).
+
+@item
+The application's replay hook reports the ticket as unused.  The library
+supplies @code{gq_replay_cache}, a bounded single-use ticket cache that
+fails closed when it is full.  If no hook is configured, early data is
+declined.
+
+@item
+No HelloRetryRequest was needed.
+@end itemize
+
+Declining early data does not decline the resumption.  The server
+continues with a 1-RTT handshake and skips the client's undecryptable
+early records within a budget, without processing them.  Over TCP the
+client ends its early data with EndOfEarlyData; in QUIC there is no such
+message and the transport carries the early data in 0-RTT packets.
+
+@subheading Client
+
+A client offers early data only when the stored session allows it and
+the ALPN protocol it wants matches the one recorded in the session.
+After a HelloRetryRequest or a rejection the client discards its early
+keys, reports the rejection through the sink so the application can
+resend the data as ordinary application data, and continues.
+
+@subheading In QUIC
+
+The QUIC transport carries early data in 0-RTT packets, which belong to
+the application data packet number space.
+
+@subsubheading Client
+The connection is given the session (@code{gq_tls_config.resume} with
+@code{early_data} set) and the server's transport parameters from the
+connection that issued it (@code{resume_params}, which the application
+keeps alongside the ticket; @code{gq_conn_get_peer_params} produces them).
+Until the server's own parameters arrive the remembered ones stand in:
+streams can be opened and written and datagrams sent at once, and 0-RTT
+packets ride behind the Initial in the first datagrams.  The session must
+come from a connection of the version this one starts in, which the
+application pins (tickets are version bound, @ref{Version negotiation}).
+The @code{early_data_result} event reports the verdict.  If the server
+accepts, its parameters must not be lower than the remembered ones or the
+connection ends with a protocol violation.  If it rejects, whatever was
+sent early is treated as never sent: stream data goes out again from the
+start in 1-RTT packets under the real limits, datagrams are reported lost,
+and the 0-RTT keys are discarded.
+
+@subsubheading Server
+The server engine derives the early read keys from the ticket; 0-RTT
+packets that arrive after the ClientHello are decrypted with them and
+processed in the application space, with ACK, CRYPTO, NEW_TOKEN,
+PATH_RESPONSE and HANDSHAKE_DONE forbidden.  Early packets that arrive
+before the ClientHello are dropped and sent again by the client.  The
+early keys are discarded three probe timeouts after the handshake
+completes.  While the callbacks for early data run,
+@code{gq_conn_early_data_active} is true: the data can be replayed, so do
+only what is safe to do twice.  A server that switched the connection to
+another version ignores 0-RTT.  The endpoint's @code{tickets} and
+@code{early_data} options provide the ticket keys and a replay cache.
+
+@node QUIC connections
+@chapter QUIC connections
+
+@cindex connection, QUIC
+@cindex stream state
+A @code{gq_conn} (@file{conn.h}) is one QUIC connection, as a state
+machine that owns no socket, thread or timer.  The caller moves datagrams
+and time:
+
+@table @code
+@item gq_conn_recv
+A datagram arrived.  It is decrypted in place.
+@item gq_conn_send
+Ask for the next datagram to transmit; call until it yields none.
+@item gq_conn_timeout
+When to call @code{gq_conn_on_timeout} next.
+@end table
+
+Time is a caller-supplied monotonic clock in microseconds, so tests run
+the same code under a simulated clock.  Application events (connected,
+stream opened, stream data, reset, stop sending, closed, connection ID
+issued and retired) reach the caller through callbacks that run inside
+the call that caused them.
+
+@heading Streams
+@file{stream.h} holds the two halves of a stream as separate objects.
+The send half buffers only bytes not yet acknowledged, hands out lost
+ranges again before new data, and holds new data back by the peer's
+credit.  The receive half delivers bytes straight to the callback when
+they continue what was delivered before, copies only data that arrives
+ahead of a gap, and enforces the final size, flow control and reset rules
+of RFC 9000 section 3.  Both use @file{ranges.h}, a bounded sorted set of
+half-open ranges, so a peer cannot make their bookkeeping grow without
+limit.
+
+@heading What a connection does
+The TLS 1.3 engine runs in QUIC mode; its output is queued as CRYPTO data
+per packet number space and its secrets become packet keys.  Received
+packets are protected and deprotected in place; coalesced packets are
+handled; duplicates are dropped by packet number.  ACKs are sent at once
+for the handshake spaces and after two packets or 25 ms otherwise (at
+once on a gap).  Loss detection follows RFC 9002 (packet and time
+thresholds, probe timeouts with back-off) and the NewReno controller
+of RFC 9002 section 7 limits what is in flight; what a lost packet carried is
+put back on the queues frame by frame.  A server obeys the
+anti-amplification limit and pads datagrams that carry ack-eliciting
+Initial packets to 1200 bytes; a client pads all its Initial datagrams.
+Keys are discarded as the handshake progresses, and the 1-RTT keys are
+updated on request, when the peer updates, and before the AEAD limit.
+
+@heading DATAGRAM
+Unreliable datagrams (RFC 9221) are enabled with
+@code{max_datagram_frame_size} in the configuration (0, the default,
+leaves them off) and need the peer to enable them too.
+@code{gq_conn_datagram_send} queues one (a bounded queue) and returns an
+id; it goes out ahead of stream data in the next packet with room, under
+congestion control, and is never retransmitted.  The @code{datagram}
+event delivers received ones, and @code{datagram_acked} and
+@code{datagram_lost} report the fate of each sent one by id.
+
+@heading Limits of this step
+Pacing and ECN are not implemented yet.  The receiving side treats a few limits as
+fixed: 64 tracked packet number ranges per space and 8 connection IDs
+in each direction.
+
+@node Endpoint
+@chapter Endpoint
+
+@cindex endpoint
+@file{endpoint.h} puts many connections behind one socket.  Like the
+connection it owns no socket, thread or timer: feed it every datagram
+(@code{gq_endpoint_recv}), take datagrams to send until it yields none
+(@code{gq_endpoint_send}), and call @code{gq_endpoint_on_timeout} when
+@code{gq_endpoint_timeout} says.  A serving endpoint is given a TLS server
+configuration and an @code{accept} callback that fills in the event
+callbacks of each new connection; a client-only endpoint just uses
+@code{gq_endpoint_connect}.  Connections it creates belong to it and are
+freed after the @code{done} callback.
+
+@heading Routing
+Each connection reports the connection IDs it issues and retires (the
+router hooks of @file{conn.h}); the endpoint keeps them in a hash table
+seeded per endpoint and routes a datagram by its destination ID.  The
+client's first destination ID stays routed to the server connection it
+created.  All connections of an endpoint use the same ID length.
+
+@cindex QUIC-LB
+@cindex connection ID, routable
+By default every connection ID a server mints is random, which is fine
+for one process but tells an external load balancer nothing.
+@file{quiclb.h} implements QUIC-LB (draft-ietf-quic-load-balancers-21): a
+connection ID whose first octet carries a config id and, plaintext or
+under AES-128 (a single pass at 16 octets, a four-round Feistel
+construction otherwise, both from section 5.4), a server identifier the
+load balancer decodes without keeping any state.  A
+@code{gq_quiclb_config} plugs into @code{gq_conn_config.cid_gen} (every
+connection ID a connection mints, including each
+@code{NEW_CONNECTION_ID}) and @code{gq_admit_config.cid_gen} (the ID
+chosen in a Retry, @ref{Address validation}, which must be routable too
+since the client addresses the rest of the handshake to it) through
+@code{gq_quiclb_cid_gen}; @code{gq_quiclb_cid_len} gives the length to set
+@code{cid_len}/@code{retry_cid_len} to.  A load balancer, or another
+server sharing the configuration, recovers the server id with
+@code{gq_quiclb_decode_server_id} or checks it with @code{gq_quiclb_is_own}.
+Verified against the draft's appendix B test vectors (unencrypted,
+single-pass and both four-pass Feistel cases) and, at the connection
+level, that every ID a server behind a configuration answers to (the
+handshake ID, the spares offered up front, the Retry ID, and the fresh
+one an active migration mints after retiring the old one) decodes to its
+own server id.
+
+@heading Admission
+A long header datagram for an unknown ID goes through
+@code{gq_quic_admit} (@ref{Address validation}): Version Negotiation,
+Retry (always, or once @code{retry_above} connections exist) or a new
+connection, subject to @code{max_connections}.
+
+@heading Stateless reset
+A short header datagram for an unknown ID is first checked against the
+stateless reset tokens the endpoint's peers gave (a hash table again): a
+match means the peer reset a connection and it ends.  Otherwise the
+endpoint answers with a stateless reset, at most
+@code{max_resets_per_second} of them, smaller than the trigger.  Tokens
+derive from a key (HMAC of the connection ID), so an endpoint that lost
+its state, or another endpoint holding the same key, answers correctly.
+
+@heading Scheduling
+The endpoint remembers which connections may have something to send (the
+connection says so after any call that can produce output) and serves them
+in turn, so that one busy connection cannot starve the rest.  Deadlines
+sit in a heap with lazy invalidation, so the cost of a quiet connection is
+nothing until its timer is due.
+
+@node Address validation
+@chapter Address validation
+
+@cindex Retry
+@cindex token, address validation
+A server that answers an unvalidated client may send at most three times
+what it received.  A client proves its address by returning a token.
+@file{token.h} makes and checks tokens: AES-256-GCM under a rotating
+key, with the client's address as associated data, an issue time, and for
+Retry the client's original destination ID and the ID the server chose.
+Nothing is stored server side.
+
+@file{listen.h} is the stateless step before a connection exists.
+@code{gq_quic_admit} looks at a datagram for an unknown connection ID and
+decides: drop it, reply (Version Negotiation for an unknown version, or a
+Retry when @code{require_retry} is set and no valid token came with it),
+or accept, filling a @code{gq_conn_accept} for
+@code{gq_conn_server_accept}.  A valid token of either kind marks the
+client validated.  A connection created after a Retry uses the ID the
+Retry chose and reports the original in its transport parameters.  Once
+the handshake completes, a connection created with token keys sends
+NEW_TOKEN for the client to use next time (the client receives it through
+the @code{new_token} event and passes it as @code{token} in its
+configuration).
+
+The client follows a Retry automatically: it verifies the integrity tag,
+keeps the token, switches to the new destination ID and Initial keys and
+sends its first flight again.  It accepts one Retry, and only before
+hearing anything else from the server.
+
+@node Version negotiation
+@chapter Version negotiation
+
+@cindex version negotiation
+Two mechanisms, both automatic once @code{gq_conn_config.versions} lists
+the versions an endpoint is willing to use (most preferred first).
+
+@heading Incompatible: Version Negotiation packets
+A server endpoint answers an Initial in a version it does not offer with
+a Version Negotiation packet (@code{gq_quic_admit} does this, listing its
+own versions).  A client that receives one which echoes its connection
+IDs and does not list the version it used starts over with the first of
+its versions the server lists: new destination ID, Initial keys and
+handshake.  If there is none the connection ends with
+@code{GQ_QERR_VERSION_NEGOTIATION} and the closed event.
+
+@heading QUIC version 2
+Version 2 (RFC 9369) differs from version 1 in four places only, all in
+@file{packet.c} and @file{protect.c}: the version number, the Initial
+salt, the HKDF label prefix (@samp{quicv2}) for packet, header protection
+and key update keys, the long header packet type bits, and the Retry
+integrity key and nonce.  Everything else is shared, so a connection
+carries its version and consults it at those points.  Defaults follow
+Gumdrop and Hopf: with nothing configured an endpoint lists v2 then v1.
+
+@heading Compatible: RFC 9368
+Every connection sends the @code{version_information} transport
+parameter: the version in use and the versions available.  QUIC v1 and v2
+are compatible, so a server that prefers another version than the one the
+client started with (once it has read the client's parameters) answers in
+that version, keeping the handshake and the connection.  The client
+switches on the first Initial it can decrypt under the new version's
+keys; the server keeps accepting the client's Initial packets in the old
+version until the client has switched.
+
+A client starts in the oldest version it lists (the one a server is most
+likely to parse, RFC 9368 section 2.5) and offers the compatible others
+in its preference order; the server takes the client's most preferred
+version that it also lists.  Two endpoints with default configuration
+therefore start in v1 and finish in v2.
+
+Session tickets are bound to the version (RFC 9369 section 5).  A server
+serves version 1 with the ticket key ring it was given and derives a
+separate ring for version 2, so a ticket issued under one version fails
+to open under the other and the handshake falls back to a full one.  The
+server engine reads the client's transport parameters before it reads
+tickets, so a compatible switch selects the right ring in time.  A
+client should offer a stored session only on a connection that starts in
+the version that issued it; the ticket event reports that version.
+
+Downgrade protection: a client checks that the server's chosen version is
+the one in use, that a compatible switch came with the parameter, and,
+after a Version Negotiation packet, that the version it restarted with is
+the one it would have chosen from the server's own list.  A forged
+Version Negotiation packet hiding a preferred version is thus caught and
+the connection ends with VERSION_NEGOTIATION_ERROR (0x11).  A server
+checks that the client's chosen version is the version of its first
+Initial.
+
+Only QUIC v1 and v2 are implemented, so compatible negotiation exists
+only between them; because they are compatible, a forged Version
+Negotiation packet that hides v2 is undone by the server moving the
+restarted connection back to the client's preferred version.  Version 2
+has been tested against itself and against the RFC 9369 vectors; none of
+the peers available for interop (quiche, OpenSSL) speaks it.
+
+@node Path validation and migration
+@chapter Path validation and migration
+
+@cindex migration
+@cindex path validation
+The library never sees a socket, so a network path is a pair of opaque
+byte strings the caller chooses (@code{gq_path}: a local and a remote
+address, normally packed IP address and port).  Only equality matters.
+@code{gq_conn_recv_path} says where a datagram came from;
+@code{gq_conn_send_path} says where the datagram it produced must go and
+from which local address.  Most datagrams go to the current path;
+probing datagrams go elsewhere and must be sent exactly there.  The plain
+@code{gq_conn_recv} and @code{gq_conn_send} give no path information and
+turn migration handling off.
+
+@heading Validation
+A path is validated by a PATH_CHALLENGE and the matching PATH_RESPONSE
+(section 8.2): up to three challenges with fresh data over a timeout of at
+least three probe timeouts, in datagrams padded to 1200 bytes when the
+amplification limit allows.  The peer's challenges are answered on the
+path they arrived on.
+
+@heading Peer migration
+A packet that carries a non-probing frame, has the highest packet number
+so far and comes from a new address means the peer moved (section 9.3).
+The connection then sends there at once, using a fresh peer connection ID
+when one is available, limited to three times what has arrived from that
+address until it validates, and validates it.  The previous path is kept
+until then.  If validation fails, the connection goes back to it and
+ignores the failed address for ten seconds so a spoofed or unreachable
+address cannot make it flap.  On a switch the congestion controller and
+RTT estimator start again (section 9.4).  At most three candidate paths
+are tracked.
+
+@heading Active migration
+@code{gq_conn_probe_path} validates a path without moving to it;
+@code{gq_conn_migrate} (clients only, and not if the server set
+disable_active_migration) validates and then moves, retiring the old
+connection ID.  A client keeps accepting datagrams from the server's
+address on any of its sockets, because a server goes on using the old path
+until it has validated the new one; datagrams from other addresses are
+ignored.  Events report path_validated, path_failed and migrated.
+
+@heading Not done
+The server's preferred_address, multipath, and choosing among several
+local addresses are left to the application.
+
+@node Roadmap
+@chapter Roadmap
+
+Each step is testable against RFC vectors or a real peer (OpenSSL, the
+GnuTLS command line tools and quiche are available on the development
+machine) before the next one starts, as in Hopf's migration plan.
+
+@enumerate
+@item
+@strong{Done.}  Status codes, variable-length integers, frame codec,
+crypto facade, trust store and policy.
+
+@item
+@strong{Done.}  The packet layer for QUIC versions 1 and 2: long and short
+header codecs, packet number encoding, key derivation and key update,
+in-place packet protection, the Retry integrity tag, Version
+Negotiation, stateless reset and transport parameters.  Verified against
+the RFC 9001 appendix A and RFC 9369 appendix A vectors and fuzzed under
+ASan and UBSan.  Address validation tokens and RFC 9368 version
+information came later (@ref{Address validation}, @ref{Version
+negotiation}).
+
+@item
+@strong{Done.}  The key exchange facade (X25519, P-256, P-384 and the
+three hybrid groups) and the signature facade (ECDSA P-256 and P-384,
+Ed25519, RSA-PSS; ML-DSA pending a backend).
+
+@item
+TLS 1.3 handshake engines, QUIC first:
+
+@enumerate a
+@item
+@strong{Done.}  Message codecs, transcript hash and the key schedule for
+SHA-256 and SHA-384.  The RFC 8448 section 3 trace is reproduced end to
+end.
+
+@item
+@strong{Done.}  The client engine, a reactive state machine with a sink
+of callbacks.  It covers HelloRetryRequest (including cookies), SNI,
+ALPN, QUIC transport parameters, certificate validation, client
+authentication, session tickets, KeyUpdate and the RFC 5705 exporter.  It
+sends key shares for a hybrid group plus a plain curve so that servers
+without post-quantum support need no retry.
+
+@item
+@strong{Done.}  The TLS record layer and TLS over TCP: AEAD records with
+inner content types and padding, the compatibility ChangeCipherSpec,
+alerts, close_notify and rekeying by record count.  All seven encrypted
+records of the RFC 8448 trace are reproduced byte for byte.
+
+@item
+@strong{Done.}  Interoperability: the client against @command{openssl
+s_server} and @command{gnutls-serv}.
+
+@item
+@strong{Done.}  The server engine: cipher suite and group selection by
+server preference, HelloRetryRequest with an optional cookie, credential
+selection by SNI, signature scheme selection, ALPN, optional or required
+client authentication, and refusal of anything below TLS 1.3.  Verified
+by a loopback test pairing the client and server engines (including
+mutated ClientHellos) and by the interop server driven by
+@command{openssl s_client} and @command{gnutls-cli}.
+
+@item
+@strong{Done.}  PSK resumption (@code{psk_dhe_ke}) on both sides:
+stateless tickets under an AES-256-GCM key ring, binders over the
+truncated ClientHello (also after a HelloRetryRequest), obfuscated ticket
+age and fallback to a full handshake.  Verified against RFC 8448 section
+4 and against real peers.
+
+@item
+@strong{Done.}  0-RTT early data with anti-replay: the engines, the
+record layer skip budget, the TCP glue and the replay cache
+(@ref{Early data}), verified against the RFC 8448 section 4 early
+traffic secret; the QUIC transport side is a step of its own below.
+@end enumerate
+
+@item
+QUIC transport:
+
+@enumerate a
+@item
+@strong{Done.}  Connection and stream state (@ref{QUIC connections}):
+range sets, the stream send and receive halves, and the connection with
+its packet number spaces, handshake, ACKs, RTT estimation, loss
+detection and probe timeouts (RFC 9002 sections 5 and 6), flow control,
+connection IDs, key update, idle timeout, close and stateless reset.
+Verified by simulated-network tests (loss, reordering, corruption, tight
+flow control) and against quiche in both directions.
+
+@item
+@strong{Done.}  Congestion control: NewReno as in RFC 9002 section 7
+(slow start, congestion avoidance, recovery periods, persistent
+congestion, window growth only while the window is in use).  Still open:
+pacing, ECN, and a pluggable controller (CUBIC, BBR).
+
+@item
+@strong{Done.}  Address validation (@ref{Address validation}): Retry and
+NEW_TOKEN tokens, the stateless admission step, and the client's handling
+of Retry.  
+
+@item
+@strong{Done.}  Version negotiation (@ref{Version negotiation}): the
+client's handling of Version Negotiation packets, RFC 9368 version
+information and compatible negotiation between QUIC v1 and v2.
+
+@item
+@strong{Done.}  Path validation and migration (@ref{Path validation and
+migration}).
+
+@item
+@strong{Done.}  DATAGRAM (RFC 9221) and the endpoint layer (@ref{Endpoint}).
+
+@item
+@strong{Done.}  QUIC-LB connection IDs (@ref{Endpoint}): a pluggable
+connection ID generator that encodes a routable server identifier,
+plaintext or AES-encrypted, into every ID a server mints, including in a
+Retry.
+
+@item
+@strong{Done.}  0-RTT in the QUIC transport (@ref{Early data}).
+@end enumerate
+
+@item
+@strong{Done.}  The TLS 1.2 engines and record layer over TCP (the
+profile of @ref{TLS 1.2 hardening}): key schedule with the PRF
+checked against published vectors, the 1.2 record layer (AES-GCM and
+ChaCha20-Poly1305), client and server engines with mutual authentication
+and RFC 5077 resumption, and the @file{tls12conn.h} wrapper.  Verified by
+loopback tests that edit each side's flight to check every refusal, and
+by interoperability scenarios against @command{openssl} and GnuTLS in
+both directions.
+
+@item
+@strong{Done.}  DTLS 1.3 (RFC 9147): the
+record layer with record number encryption and anti-replay, handshake
+fragmentation and reassembly, flights with ACKs and retransmission,
+KeyUpdate, and stateless cookies (@ref{DTLS 1.3}).  Still open for DTLS
+1.3: 0-RTT and connection IDs.
+
+@item
+@strong{Done.}  DTLS 1.2 (RFC 6347) on the TLS 1.2 engine, with the
+DTLS 1.3 fragment reassembly, whole-flight retransmission and a
+stateless HelloVerifyRequest listener (@ref{DTLS 1.2}).
+
+@item
+@strong{Done.}  Version negotiation for TLS and DTLS (@ref{Versions}):
+one listener serves 1.3 and 1.2 peers and prefers 1.3, a client offers
+both and falls back, the downgrade sentinel protects the choice, and
+either end can be pinned to one version.  Verified in simulation (every
+pairing, loss, front door on and off) and against OpenSSL, GnuTLS and
+wolfSSL.
+
+@item
+Examples: an HTTP/3 (QPACK) client and server and a DoQ (RFC 9250)
+client and server, in a separate repository or under @file{examples/}.
+@end enumerate
+
+Open decisions: whether to vendor gnulib (probably yes once portability
+shims are needed); Encrypted Client Hello and certificate compression,
+which Gumdrop has and are deferred here.  (The timer interface was
+decided: a ``next timeout'' query, for connections and endpoints alike.)
+
+Not implemented anywhere yet: pacing and ECN, the server's
+preferred_address, multipath, and DTLS 1.3 connection IDs.
+
+@subheading Planned
+@itemize @bullet
+@item
+QUIC-LB configuration rotation (@ref{Endpoint}): when a server adopts a
+@code{gq_quiclb_config} with a different config id, re-issue enough
+connection IDs under the new one and set @code{retire_prior_to} so the
+old ones are retired, as Gumdrop's @code{ConnectionIdManager.rotateTo}
+does; a keyed configuration replaces as many IDs as are active, up to
+the peer's limit, while an unkeyed one issues a single replacement since
+plaintext IDs are not rotated for unlinkability.  Today a
+@code{gq_quiclb_config} is fixed for a connection's lifetime.
+
+@item
+Gaps found by comparing with Gumdrop and Hopf: certificate compression
+(RFC 8879); @code{record_size_limit} (RFC 8449); Encrypted Client Hello
+(RFC 9849) including rotation and DTLS; ML-DSA signatures once a backend
+has them; QUIC keep-alive PING; a streams-available event when
+MAX_STREAMS raises the limit; DPLPMTUD; pacing, ECN and segmentation
+offload; the server's preferred_address; a key log hook; caching AEAD
+handles for speed; asynchronous crypto offload; and a DANE/TLSA verifier.
+Whether to send Retry by default is also open.
+@end itemize
+
+@node Internationalization
+@chapter Internationalization
+@cindex gettext
+@cindex translation
+
+Every string the library can show a person is translatable with GNU
+gettext.  Currently this is the text returned by @code{gq_strerror}.
+Protocol names, alert names and other identifiers defined by RFCs are not
+translated.
+
+The translation domain is @samp{quickstep}.  The library binds it to the
+installed locale directory in @code{gq_crypto_init}, so an application
+that calls @code{gq_crypto_init} before anything else needs no other
+setup.  The application remains responsible for calling
+@code{setlocale}.  The returned strings are owned by the library and
+valid until the next locale change.
+
+Translators work in the @file{po/} directory; @file{po/POTFILES.in}
+lists the source files that contain marked strings, and each new
+user-visible string must be added there.  Strings are marked with the
+@code{_} macro from @file{src/gettext.h}.  When the library is
+configured with @option{--disable-nls} the macro is the identity.
+
+@node GNU Free Documentation License
+@appendix GNU Free Documentation License
+
+@include fdl.texi
+
+@node Concept index
+@unnumbered Concept index
+
+@printindex cp
+
+@bye

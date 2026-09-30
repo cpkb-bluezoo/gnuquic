@@ -8,7 +8,7 @@ top_builddir = ..
 XGETTEXT_OPTIONS = --keyword=_ --keyword=N_ --flag=_:1:pass-c-format
 
 COPYRIGHT_HOLDER = Chris Burdess
-MSGID_BUGS_ADDRESS = bug-gnuquic@gnu.org
+MSGID_BUGS_ADDRESS = bug-quickstep@gnu.org
 
 EXTRA_LOCALE_CATEGORIES =
 USE_MSGCTXT = no

@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -22,9 +22,9 @@
 
 #include <string.h>
 
-#include <gnuquic/status.h>
-#include <gnuquic/crypto.h>
-#include <gnuquic/token.h>
+#include <quickstep/status.h>
+#include <quickstep/crypto.h>
+#include <quickstep/token.h>
 
 #define NONCE_LEN GQ_AEAD_NONCE_LEN
 #define PT_MAX (1 + 8 + 1 + GQ_MAX_CID_LEN + 1 + GQ_MAX_CID_LEN)

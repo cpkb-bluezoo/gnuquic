@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -18,20 +18,20 @@
 
 /* Internals shared by the QUIC connection source files.  */
 
-#ifndef GNUQUIC_CONN_INT_H
-#define GNUQUIC_CONN_INT_H
+#ifndef QUICKSTEP_CONN_INT_H
+#define QUICKSTEP_CONN_INT_H
 
-#include <gnuquic/status.h>
-#include <gnuquic/crypto.h>
-#include <gnuquic/varint.h>
-#include <gnuquic/frame.h>
-#include <gnuquic/packet.h>
-#include <gnuquic/protect.h>
-#include <gnuquic/tparams.h>
-#include <gnuquic/ranges.h>
-#include <gnuquic/stream.h>
-#include <gnuquic/tls.h>
-#include <gnuquic/conn.h>
+#include <quickstep/status.h>
+#include <quickstep/crypto.h>
+#include <quickstep/varint.h>
+#include <quickstep/frame.h>
+#include <quickstep/packet.h>
+#include <quickstep/protect.h>
+#include <quickstep/tparams.h>
+#include <quickstep/ranges.h>
+#include <quickstep/stream.h>
+#include <quickstep/tls.h>
+#include <quickstep/conn.h>
 
 enum { SP_INITIAL, SP_HANDSHAKE, SP_APP, N_SPACES };
 
@@ -390,4 +390,4 @@ void conn_install_keys (gq_conn *c, const gq_tls_secret *s);
                            : (l) == GQ_LEVEL_HANDSHAKE ? SP_HANDSHAKE \
                            : (l) == GQ_LEVEL_APPLICATION ? SP_APP : -1)
 
-#endif /* GNUQUIC_CONN_INT_H */
+#endif /* QUICKSTEP_CONN_INT_H */

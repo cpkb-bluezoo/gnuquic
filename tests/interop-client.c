@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -16,7 +16,7 @@
    License along with this program.  If not, see
    <https://www.gnu.org/licenses/>.  */
 
-/* A small TLS 1.3 (or, with --tls12, TLS 1.2) client used to test GNU QUIC
+/* A small TLS 1.3 (or, with --tls12, TLS 1.2) client used to test quickstep
    against independent servers (OpenSSL, GnuTLS).  It is a test tool, not
    part of the library: it does blocking socket I/O around gq_tlsconn or
    gq_tls12conn.
@@ -42,11 +42,11 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include <gnuquic/status.h>
-#include <gnuquic/policy.h>
-#include <gnuquic/tlsconn.h>
-#include <gnuquic/tls12conn.h>
-#include <gnuquic/tlsauto.h>
+#include <quickstep/status.h>
+#include <quickstep/policy.h>
+#include <quickstep/tlsconn.h>
+#include <quickstep/tls12conn.h>
+#include <quickstep/tlsauto.h>
 
 #include "interop-util.h"
 

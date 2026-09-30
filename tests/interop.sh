@@ -1,14 +1,14 @@
 #!/bin/sh
 # GQ_INTEROP_FILTER=text runs only the scenarios whose names contain it.
-# Interoperability tests: the GNU QUIC TLS 1.3 and TLS 1.2 clients and servers
+# Interoperability tests: the quickstep TLS 1.3 and TLS 1.2 clients and servers
 # against OpenSSL's s_server/s_client and GnuTLS's gnutls-serv/gnutls-cli.  Skipped (exit 77) when neither server
 # is installed or GQ_NO_INTEROP is set.
 #
 # Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 #
-# This file is part of GNU QUIC.
+# This file is part of quickstep.
 #
-# GNU QUIC is free software: you can redistribute it and/or modify it
+# quickstep is free software: you can redistribute it and/or modify it
 # under the terms of the GNU Lesser General Public License as published
 # by the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.

@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -17,7 +17,7 @@
    <https://www.gnu.org/licenses/>.  */
 
 /* Message translation.  Every user-visible string in the library is
-   marked with _() and looked up in the "gnuquic" domain.  Without NLS the
+   marked with _() and looked up in the "quickstep" domain.  Without NLS the
    macros vanish.  */
 
 #ifndef GQ_GETTEXT_H
@@ -25,7 +25,7 @@
 
 #ifdef ENABLE_NLS
 # include <libintl.h>
-# define GQ_TEXTDOMAIN "gnuquic"
+# define GQ_TEXTDOMAIN "quickstep"
 # define _(msgid) dgettext (GQ_TEXTDOMAIN, msgid)
 #else
 # define _(msgid) (msgid)

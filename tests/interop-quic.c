@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -18,7 +18,7 @@
 
 /* A small QUIC client and server over real UDP sockets, speaking the
    HTTP/0.9 style "hq-interop" protocol (one request "GET /path" per
-   bidirectional stream, answered with the file), for testing GNU QUIC
+   bidirectional stream, answered with the file), for testing quickstep
    against independent implementations.  A test tool, not part of the
    library.
 
@@ -47,10 +47,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <gnuquic/status.h>
-#include <gnuquic/conn.h>
-#include <gnuquic/listen.h>
-#include <gnuquic/endpoint.h>
+#include <quickstep/status.h>
+#include <quickstep/conn.h>
+#include <quickstep/listen.h>
+#include <quickstep/endpoint.h>
 
 #include "interop-util.h"
 

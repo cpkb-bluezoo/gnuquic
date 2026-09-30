@@ -1,7 +1,7 @@
-GNU QUIC
+quickstep
 ========
 
-GNU QUIC is a QUIC (RFC 9000), TLS 1.2/1.3 and DTLS 1.2/1.3 engine
+quickstep is a QUIC (RFC 9000), TLS 1.2/1.3 and DTLS 1.2/1.3 engine
 written in C for the GNU system.  It is the substrate on which HTTP/3
 and DNS over QUIC (DoQ) clients and servers are meant to be built.
 
@@ -97,7 +97,7 @@ Pre-alpha.  What exists today:
 
 Not yet written: pacing and ECN, the server's
 preferred_address, and the HTTP/3 and DoQ examples.  See the manual
-(doc/gnuquic.texi) for the design, security policy and roadmap.
+(doc/quickstep.texi) for the design, security policy and roadmap.
 
 Building
 --------
@@ -115,12 +115,12 @@ is expected to be free of compiler warnings.
 Reporting bugs
 --------------
 
-Report bugs, including documentation bugs, to <bug-gnuquic@gnu.org>.
+Report bugs, including documentation bugs, to <bug-quickstep@gnu.org>.
 
 Licence
 -------
 
-GNU QUIC is free software: you can redistribute it and/or modify it under
+quickstep is free software: you can redistribute it and/or modify it under
 the terms of the GNU Lesser General Public License as published by the
 Free Software Foundation, either version 3 of the License, or (at your
 option) any later version.  See COPYING.LESSER and COPYING.

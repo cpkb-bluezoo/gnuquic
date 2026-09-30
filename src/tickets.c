@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -23,9 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <gnuquic/status.h>
-#include <gnuquic/crypto.h>
-#include <gnuquic/tickets.h>
+#include <quickstep/status.h>
+#include <quickstep/crypto.h>
+#include <quickstep/tickets.h>
 
 #define TRY(expr) do { int r_ = (expr); if (r_ != GQ_OK) return r_; } while (0)
 
@@ -54,7 +54,7 @@ key_name (const uint8_t key[GQ_TICKET_KEY_LEN], uint8_t name[NAME_LEN])
 {
   uint8_t in[GQ_TICKET_KEY_LEN + 16], h[32];
 
-  memcpy (in, "gnuquic ticket:", 16);
+  memcpy (in, "quickstep-tick:", 16);
   memcpy (in + 16, key, GQ_TICKET_KEY_LEN);
   TRY (gq_hash_compute (GQ_HASH_SHA256, in, sizeof in, h, sizeof h));
   memcpy (name, h, NAME_LEN);

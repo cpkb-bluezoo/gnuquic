@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -20,12 +20,12 @@
 # include <config.h>
 #endif
 
-#include <gnuquic/status.h>
-#include <gnuquic/policy.h>
-#include <gnuquic/tls.h>
-#include <gnuquic/tlsmsg.h>
-#include <gnuquic/keysched.h>
-#include <gnuquic/transcript.h>
+#include <quickstep/status.h>
+#include <quickstep/policy.h>
+#include <quickstep/tls.h>
+#include <quickstep/tlsmsg.h>
+#include <quickstep/keysched.h>
+#include <quickstep/transcript.h>
 
 #include "tst-util.h"
 #include "vectors-resume.h"

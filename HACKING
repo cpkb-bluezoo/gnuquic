@@ -1,4 +1,4 @@
-Hacking on GNU QUIC
+Hacking on quickstep
 ===================
 
 Coding style
@@ -72,7 +72,7 @@ whose licence is not compatible with LGPLv3+.
 
 Documentation and translation
 
-The manual is Texinfo (doc/gnuquic.texi); update it with any change to
+The manual is Texinfo (doc/quickstep.texi); update it with any change to
 design, policy or roadmap.  Build it with "make info" or "make pdf".
 
 Every string a person might read (for example the text returned by

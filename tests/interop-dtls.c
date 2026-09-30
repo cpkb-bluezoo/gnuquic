@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -17,7 +17,7 @@
    <https://www.gnu.org/licenses/>.  */
 
 /* A small DTLS 1.3 (or, with --dtls12, DTLS 1.2) client and server over
-   real UDP sockets, built on gq_dtls or gq_dtls12, for testing GNU QUIC against an independent implementation
+   real UDP sockets, built on gq_dtls or gq_dtls12, for testing quickstep against an independent implementation
    (tests/wolf-dtls.c, wolfSSL).  A test tool, not part of the library.
 
    interop-dtls client HOST PORT --ca FILE [options]
@@ -42,13 +42,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <gnuquic/status.h>
-#include <gnuquic/policy.h>
-#include <gnuquic/dtls.h>
-#include <gnuquic/dtls12.h>
-#include <gnuquic/dtls12cookie.h>
-#include <gnuquic/dtlsauto.h>
-#include <gnuquic/dtlscookie.h>
+#include <quickstep/status.h>
+#include <quickstep/policy.h>
+#include <quickstep/dtls.h>
+#include <quickstep/dtls12.h>
+#include <quickstep/dtls12cookie.h>
+#include <quickstep/dtlsauto.h>
+#include <quickstep/dtlscookie.h>
 
 #include "interop-util.h"
 

@@ -2,14 +2,14 @@ dnl Process this file with autoconf to produce a configure script.
 dnl
 dnl Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 dnl
-dnl This file is part of GNU QUIC.
+dnl This file is part of quickstep.
 dnl
-dnl GNU QUIC is free software: you can redistribute it and/or modify it
+dnl quickstep is free software: you can redistribute it and/or modify it
 dnl under the terms of the GNU Lesser General Public License as published
 dnl by the Free Software Foundation, either version 3 of the License, or
 dnl (at your option) any later version.
 dnl
-dnl GNU QUIC is distributed in the hope that it will be useful, but
+dnl quickstep is distributed in the hope that it will be useful, but
 dnl WITHOUT ANY WARRANTY; without even the implied warranty of
 dnl MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 dnl Lesser General Public License for more details.
@@ -19,8 +19,8 @@ dnl License along with this program.  If not, see
 dnl <https://www.gnu.org/licenses/>.
 
 AC_PREREQ([2.71])
-AC_INIT([GNU QUIC], [0.0.1], [bug-gnuquic@gnu.org], [gnuquic],
-        [https://www.gnu.org/software/gnuquic/])
+AC_INIT([quickstep], [0.0.1], [bug-quickstep@gnu.org], [quickstep],
+        [https://www.gnu.org/software/quickstep/])
 AC_CONFIG_SRCDIR([src/varint.c])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
@@ -36,7 +36,7 @@ AM_SILENT_RULES([yes])
 AC_PROG_CC
 AC_USE_SYSTEM_EXTENSIONS
 
-dnl GNU QUIC is written in ISO C99 and is built with -std=c99 so that
+dnl quickstep is written in ISO C99 and is built with -std=c99 so that
 dnl nothing newer sneaks in.  Fail early if the compiler cannot do it.
 AC_MSG_CHECKING([whether $CC supports -std=c99])
 gq_save_CFLAGS=$CFLAGS
@@ -57,8 +57,8 @@ LT_INIT([win32-dll])
 
 dnl Libtool interface versioning: current:revision:age.  Bump per the
 dnl libtool manual before each release.
-LIBGNUQUIC_LTVERSION=0:0:0
-AC_SUBST([LIBGNUQUIC_LTVERSION])
+LIBQUICKSTEP_LTVERSION=0:0:0
+AC_SUBST([LIBQUICKSTEP_LTVERSION])
 
 dnl Message translation with GNU gettext.  The library is a plain
 dnl consumer of the system gettext (glibc or an installed libintl).
@@ -104,7 +104,7 @@ AS_IF([test "x$with_wolfssl" != xno],
         [AC_MSG_ERROR([wolfSSL not found])])])])
 AM_CONDITIONAL([HAVE_WOLFSSL], [test "x$have_wolfssl" = xyes])
 
-dnl Warnings.  GNU QUIC is expected to build with zero warnings.
+dnl Warnings.  quickstep is expected to build with zero warnings.
 AC_ARG_ENABLE([warnings],
   [AS_HELP_STRING([--disable-warnings], [do not add extra compiler warnings])],
   [], [enable_warnings=yes])
@@ -122,5 +122,5 @@ AC_CONFIG_FILES([Makefile
                  po/Makefile.in
                  doc/Makefile
                  tests/Makefile
-                 gnuquic.pc])
+                 quickstep.pc])
 AC_OUTPUT

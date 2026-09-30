@@ -1,13 +1,13 @@
 /* Copyright (C) 2026 Chris Burdess <dog@gnu.org>
 
-   This file is part of GNU QUIC.
+   This file is part of quickstep.
 
-   GNU QUIC is free software: you can redistribute it and/or modify it
+   quickstep is free software: you can redistribute it and/or modify it
    under the terms of the GNU Lesser General Public License as published
    by the Free Software Foundation, either version 3 of the License, or
    (at your option) any later version.
 
-   GNU QUIC is distributed in the hope that it will be useful, but
+   quickstep is distributed in the hope that it will be useful, but
    WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
@@ -23,12 +23,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <gnuquic/status.h>
-#include <gnuquic/crypto.h>
-#include <gnuquic/dtls12rec.h>
-#include <gnuquic/dtlshs.h>
-#include <gnuquic/tls12msg.h>
-#include <gnuquic/dtls12cookie.h>
+#include <quickstep/status.h>
+#include <quickstep/crypto.h>
+#include <quickstep/dtls12rec.h>
+#include <quickstep/dtlshs.h>
+#include <quickstep/tls12msg.h>
+#include <quickstep/dtls12cookie.h>
 
 #include "dtls_int.h"
 
